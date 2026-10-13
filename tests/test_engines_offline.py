@@ -43,6 +43,28 @@ def test_merge_denied_combines_audit_and_inbound_by_ip():
     assert merged.iloc[0]["source_ip"] == "1.2.3.4"
 
 
+def test_merge_denied_handles_numpy_array_principal_lists():
+    # Real runs (and a frame persisted to a table then read back) hand principal_list back as numpy
+    # arrays, not plain lists. A numpy array can't be truth-tested, so the old `lst or []` raised
+    # "truth value of an array ... is ambiguous"; as_list normalises it. Regression guard.
+    import numpy as np
+
+    def _np_denied(source_ip, events, principals):
+        row = _denied(source_ip, events, list(principals))
+        row["principal_list"] = np.array(principals, dtype=object)
+        return row
+
+    audit = pd.DataFrame([_np_denied("1.2.3.4", 3, ["alice", "eve"])])
+    inbound = pd.DataFrame([_np_denied("1.2.3.4", 4, ["carol"])])
+    merged = ing._merge_denied(audit, inbound)  # must not raise
+
+    row = merged.to_dict(orient="records")[0]
+    assert row["source_ip"] == "1.2.3.4"
+    assert row["denied_events"] == 7  # 3 + 4
+    assert row["principal_list"] == ["alice", "carol", "eve"]  # unioned + sorted
+    assert row["principals"] == 3
+
+
 def test_read_inbound_network_denied_degrades_when_table_absent(monkeypatch):
     import dbx_nwp_helper.sql as sqlmod
 

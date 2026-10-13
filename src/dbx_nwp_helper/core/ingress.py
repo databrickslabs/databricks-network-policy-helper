@@ -217,7 +217,10 @@ def _merge_denied(audit_denied: pd.DataFrame, inbound_denied: pd.DataFrame) -> p
         return audit_denied
 
     def _agg(group: pd.DataFrame) -> pd.Series:
-        principals = sorted({p for lst in group["principal_list"].dropna() for p in (lst or [])})
+        # Each cell may be a numpy array (SQL collect_set, or the frame persisted to a table and read
+        # back), a plain list, or NULL/NaN — enrich.as_list normalises all of them. Never truth-test
+        # the cell directly (`lst or []` raises ValueError on a multi-element numpy array).
+        principals = sorted({p for lst in group["principal_list"] for p in enrich.as_list(lst)})
         return pd.Series(
             {
                 "denied_events": int(group["denied_events"].sum()),
