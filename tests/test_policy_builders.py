@@ -132,6 +132,89 @@ def test_apply_ingress_update_clears_opposite_mode_field():
     assert acct.updated.ingress_dry_run is not None  # new dry-run block set
 
 
+def test_build_private_access_block_account_level():
+    blk = policy.build_private_access_block("ACCOUNT").as_dict()
+    assert blk["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
+    assert not blk.get("allow_rules")  # no per-endpoint rules needed at account level
+
+
+def test_build_private_access_block_endpoint_level_maps_ids():
+    blk = policy.build_private_access_block("ENDPOINT", ["vpce-aaa", "vpce-bbb"]).as_dict()
+    assert blk["restriction_mode"] == "RESTRICTED_ACCESS"
+    endpoints = blk["allow_rules"][0]["origin"]["endpoints"]["endpoint_ids"]
+    assert endpoints == ["vpce-aaa", "vpce-bbb"]  # PAS allowed_vpc_endpoint_ids mapped across as-is
+
+
+def test_build_private_access_endpoint_level_without_ids_falls_back_to_account():
+    # ENDPOINT level but no ids resolved → allow-all-registered rather than an empty restricted block.
+    blk = policy.build_private_access_block("ENDPOINT", []).as_dict()
+    assert blk["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
+
+
+def test_build_ingress_block_includes_private_access():
+    blk = policy.build_ingress_block(
+        [_allow()], [], private_access=policy.build_private_access_block("ACCOUNT")
+    ).as_dict()
+    assert blk["public_access"]["restriction_mode"] == "RESTRICTED_ACCESS"
+    assert blk["private_access"]["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
+
+
+def test_build_ingress_block_skip_public_private_only():
+    # Private-only workspace: no public_access block, just private_access.
+    blk = policy.build_ingress_block(
+        [], [], private_access=policy.build_private_access_block("ACCOUNT"), include_public=False
+    ).as_dict()
+    assert "public_access" not in blk
+    assert blk["private_access"]["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
+
+
+def test_apply_ingress_update_preserves_existing_private_and_cross_workspace():
+    # A same-id update that rebuilds only public_access must NOT drop a private_access /
+    # cross_workspace_access block the existing policy already carried (full-replace, but preserved).
+    from databricks.sdk.service.settings import (
+        AccountNetworkPolicy,
+    )
+    from databricks.sdk.service.settings import (
+        CustomerFacingIngressNetworkPolicyCrossWorkspaceAccess as XWS,
+    )
+    from databricks.sdk.service.settings import (
+        CustomerFacingIngressNetworkPolicyCrossWorkspaceAccessRestrictionMode as XWSMode,
+    )
+
+    prior = policy.build_ingress_block(
+        [_allow()], [], private_access=policy.build_private_access_block("ACCOUNT")
+    )
+    prior.cross_workspace_access = XWS(restriction_mode=XWSMode.RESTRICTED_ACCESS)
+    existing = AccountNetworkPolicy(
+        account_id="acc", network_policy_id="p", egress=policy.build_full_access_egress(), ingress=prior
+    )
+    acct = _UpdateAcct(existing)
+    # Rebuild public-only (no private_access, no cross_workspace on the new block).
+    policy.apply_ingress(acct, "acc", "p", policy.build_ingress_block([_allow()], []), "ingress")
+    assert acct.updated.ingress.private_access is not None  # preserved
+    assert acct.updated.ingress.cross_workspace_access.restriction_mode.value == "RESTRICTED_ACCESS"
+
+
+def test_apply_ingress_update_migration_overwrites_private_access():
+    # When we DO build a private_access block (a PrivateLink migration), it replaces the prior one.
+    from databricks.sdk.service.settings import AccountNetworkPolicy
+
+    prior = policy.build_ingress_block(
+        [_allow()], [], private_access=policy.build_private_access_block("ACCOUNT")
+    )
+    existing = AccountNetworkPolicy(
+        account_id="acc", network_policy_id="p", egress=policy.build_full_access_egress(), ingress=prior
+    )
+    acct = _UpdateAcct(existing)
+    new_block = policy.build_ingress_block(
+        [_allow()], [], private_access=policy.build_private_access_block("ENDPOINT", ["vpce-zzz"])
+    )
+    policy.apply_ingress(acct, "acc", "p", new_block, "ingress")
+    d = acct.updated.ingress.private_access.as_dict()
+    assert d["restriction_mode"] == "RESTRICTED_ACCESS"
+    assert d["allow_rules"][0]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-zzz"]
+
+
 def test_ingress_content_reports_populated_blocks_and_empty_for_permissive():
     from dbx_nwp_helper.core import acl
 

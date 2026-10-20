@@ -28,6 +28,34 @@ def workspace_pas_attached(account, workspace_id) -> bool | None:
         return None
 
 
+def read_private_access_settings(account, workspace_id) -> dict | None:
+    """Read the workspace's Private Access Settings (front-end PrivateLink config) so the CLI can
+    mirror it into a CBI private_access block. Returns a plain dict, or None if the workspace has no
+    PAS (not a PrivateLink workspace) or it couldn't be read (best-effort):
+
+        {"pas_id": str,
+         "level": "ACCOUNT" | "ENDPOINT",     # ACCOUNT = any registered endpoint; ENDPOINT = specific
+         "endpoint_ids": [str, ...],           # the allowed registered-endpoint ids (ENDPOINT level)
+         "public_access_enabled": bool}        # False => private-only workspace (public disabled)
+
+    AWS/GCP only — Azure workspaces have no PAS object (the CLI flags those separately)."""
+    try:
+        ws = account.workspaces.get(workspace_id=int(workspace_id))
+        pas_id = getattr(ws, "private_access_settings_id", None)
+        if not pas_id:
+            return None
+        pas = account.private_access.get(private_access_settings_id=pas_id)
+    except Exception:  # noqa: BLE001 - no PAS / no access / API unavailable → best-effort None
+        return None
+    level = getattr(pas, "private_access_level", None)
+    return {
+        "pas_id": pas_id,
+        "level": str(getattr(level, "value", level) or "ACCOUNT"),
+        "endpoint_ids": list(getattr(pas, "allowed_vpc_endpoint_ids", None) or []),
+        "public_access_enabled": bool(getattr(pas, "public_access_enabled", True)),
+    }
+
+
 def _block_restrictive(blk) -> bool:
     """True if a single access sub-block restricts traffic — RESTRICTED_ACCESS mode, or any
     allow/deny rules. Permissive defaults (FULL_ACCESS / ALLOW_ALL_REGISTERED_ENDPOINTS / LEGACY_MODE
@@ -47,7 +75,8 @@ def public_restrictive(ingress) -> bool:
 
 def private_or_xws_restrictive(ingress) -> bool:
     """True if the ingress block's private_access (PrivateLink) or cross_workspace_access sub-block
-    is restrictive — the parts the public-IP helpers don't build and can't yet preserve."""
+    is restrictive. A same-id update preserves these untouched (apply_ingress); this flags the case
+    where creating a NEW policy id would rebind the workspace and drop them, so the CLI can warn."""
     if ingress is None:
         return False
     return _block_restrictive(getattr(ingress, "private_access", None)) or _block_restrictive(

@@ -279,10 +279,14 @@ def denied_requests(lookback_days: int, use_inet: bool = True) -> str:
 
 
 def inbound_network_denied(lookback_days: int) -> str:
-    """Inbound requests denied by a **CBI network policy** (log-only DENY_DRY_RUN or enforced DENY),
-    from system.access.inbound_network. That table records only denied inbound events and exists only
+    """Inbound requests **enforced-denied** by a CBI network policy (access_type='DROP'), from
+    system.access.inbound_network. That table records only denied inbound events and exists only
     where network monitoring is enabled, so the caller runs this best-effort and degrades if the
-    table is absent/empty. Same output shape as `denied_requests` so the two union cleanly."""
+    table is absent/empty. Same output shape as `denied_requests` so the two union cleanly.
+
+    Only DROP (real, enforced blocks) feeds the recently-denied view here; log-only
+    DRY_RUN_DENIAL rows are not denials — they're IPs a *dry-run* policy WOULD block, so they feed
+    the allow-list candidate set instead (see `candidate_ips_from_inbound_network`)."""
     return f"""
     SELECT source.ip AS source_ip,
       COUNT(*) AS denied_events,
@@ -291,9 +295,38 @@ def inbound_network_denied(lookback_days: int) -> str:
       MIN(CAST(event_time AS DATE)) AS first_denied, MAX(CAST(event_time AS DATE)) AS last_denied
     FROM system.access.inbound_network
     WHERE event_time >= current_date() - INTERVAL {lookback_days} DAYS
+      AND access_type = 'DROP'
       AND source.ip IS NOT NULL
     GROUP BY source.ip
     ORDER BY denied_events DESC
+    """
+
+
+def candidate_ips_from_inbound_network(lookback_days: int, min_events: int = 1) -> str:
+    """Public source IPs that a **dry-run** CBI ingress policy WOULD have denied
+    (access_type='DRY_RUN_DENIAL') in system.access.inbound_network — i.e. inbound clients the
+    current (log-only) allow-list doesn't yet cover, and therefore good candidates to allow-list.
+
+    Shaped to line up with `frequent_public_ips` (public_ip + events/principals/dates +
+    principal_list) so the rows merge straight into the candidate set before enrichment. The table
+    records only denied inbound events and exists only where network monitoring is enabled, so the
+    caller runs this best-effort and degrades if it's absent/empty. Private/reserved IPs are filtered
+    out in Python after the query (CBI governs public ingress, so source.ip is normally public)."""
+    return f"""
+    SELECT source.ip AS public_ip,
+      COUNT(*) AS events,
+      COUNT(DISTINCT authenticated_as) AS principals,
+      COUNT(DISTINCT CAST(event_time AS DATE)) AS active_days,
+      sort_array(collect_set(authenticated_as)) AS principal_list,
+      MIN(CAST(event_time AS DATE)) AS first_active_date,
+      MAX(CAST(event_time AS DATE)) AS last_active_date
+    FROM system.access.inbound_network
+    WHERE event_time >= current_date() - INTERVAL {lookback_days} DAYS
+      AND access_type = 'DRY_RUN_DENIAL'
+      AND source.ip IS NOT NULL
+    GROUP BY source.ip
+    HAVING COUNT(*) >= {min_events}
+    ORDER BY events DESC
     """
 
 

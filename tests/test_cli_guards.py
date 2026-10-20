@@ -812,26 +812,36 @@ def _fake_pol(ingress=None, dry=None, egress=None):
     return type("P", (), {"ingress": ingress, "ingress_dry_run": dry, "egress": egress})()
 
 
-def test_ingress_preflight_aborts_on_pas(monkeypatch):
-    import typer
+def test_ingress_preflight_no_longer_aborts_on_pas(monkeypatch):
+    # PrivateLink (a PAS) no longer aborts the preflight — it's handled up front by
+    # _reconcile_private_access (which mirrors the PAS into a private_access block). A clean assigned
+    # policy must proceed without raising.
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: (None, None))
+    cli._ingress_preflight(object(), 42, "new-id", yes=True)  # must not raise
 
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: True)
-    with pytest.raises(typer.Exit) as e:
-        cli._ingress_preflight(object(), 42, "new-id", yes=True)
-    assert e.value.exit_code == 1
 
-
-def test_ingress_preflight_aborts_on_private_config(monkeypatch):
-    import typer
-
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+def test_ingress_preflight_warns_on_private_config_new_id_then_proceeds(monkeypatch, capsys):
+    # A NEW policy id rebind that would drop the assigned policy's private-access / cross-workspace
+    # rules now WARNS (pointing at add_to_existing) instead of aborting.
     monkeypatch.setattr(
         "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(ingress="X"))
     )
     monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: ing == "X")
-    with pytest.raises(typer.Exit) as e:
-        cli._ingress_preflight(object(), 42, "new-id", yes=True)
-    assert e.value.exit_code == 1
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: False)
+    cli._ingress_preflight(object(), 42, "new-id", yes=True)  # must not raise
+    out = capsys.readouterr().out
+    assert "private-access or" in out and "add_to_existing" in out
+
+
+def test_ingress_preflight_same_id_no_private_warning(monkeypatch, capsys):
+    # Updating the SAME id preserves private-access / cross-workspace (apply_ingress), so no warning.
+    monkeypatch.setattr(
+        "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(ingress="X"))
+    )
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: ing == "X")
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: False)
+    cli._ingress_preflight(object(), 42, "p1", yes=True)  # same id → must not warn/raise
+    assert "private-access or" not in capsys.readouterr().out
 
 
 def test_ingress_preflight_aborts_on_enforced_public(monkeypatch):

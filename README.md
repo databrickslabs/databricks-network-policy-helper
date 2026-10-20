@@ -84,7 +84,7 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 
 **Command-specific:**
 
-- 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--threat-deny-rules`, `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--disable-existing-ip-acls`. Existing IP access lists are **auto-detected** and you're prompted (a per-entry checkbox) to migrate them — no flag.
+- 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--threat-deny-rules`, `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--include-inbound-network` (use dry-run CBI denials as allow-list candidates; on by default), `--disable-existing-ip-acls`. Existing IP access lists are **auto-detected** and you're prompted (a per-entry checkbox) to migrate them; front-end PrivateLink (the workspace PAS) is likewise **auto-detected** on AWS/GCP and offered for migration into a `private_access` block — no flags.
 - 📤 **`egress`**: `--block-threat-domains` (off/matched_only/all), `--threat-feed`, `--source-type-filter`.
 
 ## 🗺️ How each command flows
@@ -108,10 +108,11 @@ flowchart TD
     F -->|ip_only| G["One rule set: these CIDRs, all destinations"]
     F -->|ip_and_destination| G2["Scope to Apps / Lakebase where traffic maps"]
     F -->|"ip_and_identity / …"| G3["Resolve principals via SCIM<br/>per-identity auth not enforceable on these dests;<br/>unresolved groups excluded"]
-    G --> H
-    G2 --> H
-    G3 --> H
-    H["Existing IP ACLs auto-detected → prompt to migrate (kept with traffic rules)<br/>+ threat-deny rules + deny-denied-IPs optional"] --> P["Preview proposed policy"]
+    G --> FEPL
+    G2 --> FEPL
+    G3 --> FEPL
+    FEPL["Front-end PrivateLink auto-detected (AWS/GCP PAS) → mirror into private_access<br/>private-only ⇒ skip public allow-list; Azure ⇒ flag to verify"] --> H
+    H["Existing IP ACLs auto-detected → prompt to migrate (kept with traffic rules)<br/>partner-platform IPs (Power BI / dbt) flagged + recommended<br/>+ threat-deny rules + deny-denied-IPs optional<br/>cross-workspace left in compatibility mode"] --> P["Preview proposed policy"]
     P --> EXP{"--export?"}
     EXP -->|yes| EXPW["Write JSON + Terraform"]
     EXP -->|no| CR{"--create-policy?"}
@@ -122,9 +123,10 @@ flowchart TD
     ACT -->|create_new| SC{"--policy-scope"}
     SC -->|per_workspace| PW["One policy per workspace: name-ws-id<br/>no pre-checks"]
     SC -->|"current / all_workspaces"| PFq{"Assigned policy safe to bind?"}
-    PFq -->|"PAS / private / xws / enforced public ingress"| X3["ABORT"]
+    PFq -->|"enforced restrictive public ingress"| X3["ABORT"]
     PFq -->|"new id would drop enforced egress"| X3
     PFq -->|"dry-run restrictive → warn"| WR["Warn, continue"]
+    PFq -->|"new id drops private/xws → warn"| WR
     PFq -->|"clean / allow-all"| WR
     WR --> WMODE{"--policy-mode"}
     U --> WMODE
@@ -369,14 +371,20 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   for the current directory), single-policy scopes only, and it works in propose-only mode.
 - **Pre-checks (create + assign).** Before creating and assigning a single policy, each command
   inspects the workspace's currently-assigned policy and aborts (or warns) rather than silently
-  clobbering it. **Ingress** aborts on PrivateLink (a PAS), private-access / cross-workspace rules,
-  or an enforced restrictive public ingress. **Egress** aborts on an enforced restrictive egress
-  (warns on a dry-run one). Both also guard the *opposite* direction: when creating a policy under a
-  **new** id (which rebinds the workspace, dropping the old policy's other block via the permissive
-  default), they abort if that would drop an enforced restrictive block — pointing you at
-  `--policy-action add_to_existing --existing-policy-id <id>` to keep it. An allow-all assigned
-  policy, or updating the same id in place, is fine.
-- Requires `databricks-sdk>=0.113.0` for the network-policy dataclasses (pinned in `pyproject.toml`).
+  clobbering it. **Ingress** aborts on an enforced restrictive public ingress. **Egress** aborts on
+  an enforced restrictive egress (warns on a dry-run one). Both also guard the *opposite* direction:
+  when creating a policy under a **new** id (which rebinds the workspace, dropping the old policy's
+  other block via the permissive default), they abort if that would drop an enforced restrictive
+  block — pointing you at `--policy-action add_to_existing --existing-policy-id <id>` to keep it. An
+  allow-all assigned policy, or updating the same id in place, is fine.
+- **Front-end PrivateLink & cross-workspace.** A PrivateLink workspace no longer aborts ingress: on
+  AWS/GCP the CLI reads the workspace's Private Access Settings and offers to mirror them into a
+  `private_access` block (private-only workspaces skip the moot public allow-list); Azure is flagged
+  for you to verify (no PAS object exists to read). Cross-workspace access is left in **compatibility
+  mode** — existing private-access / cross-workspace config is preserved untouched on a same-id
+  update, and a new-id rebind warns rather than clobbering.
+- Requires `databricks-sdk>=0.152.0` for the network-policy dataclasses — including the
+  `private_access` / `cross_workspace_access` blocks (pinned in `pyproject.toml`).
 - **Applying a policy needs account-level auth**, which is separate from workspace auth — a workspace
   OAuth session can't call the account API. Use `--account-profile <name>` pointing at an account
   login (`databricks auth login --host <account-console-host> --account-id <id>`), or set account
@@ -390,9 +398,20 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   dry-run would-be-denials — so stand up an egress policy in `dry_run` first, let it observe, then
   run `dbx-nwp-helper egress` to turn the observed destinations into an allow-list.
 - **Recently-denied inbound** combines two sources: IP-access-list 403s (`system.access.audit`) and
-  CBI network-policy denials (`system.access.inbound_network`, when that table is available — it
-  records only denied inbound events and exists where network monitoring is enabled). Both are
-  merged by source IP; the CBI source is best-effort and skipped cleanly if the table is absent.
+  **enforced** CBI network-policy denials (`system.access.inbound_network` `access_type=DROP`, when
+  that table is available — it records only denied inbound events and exists where network monitoring
+  is enabled). Both are merged by source IP; the CBI source is best-effort and skipped cleanly if the
+  table is absent.
+- **Dry-run CBI denials become allow-list candidates.** When `system.access.inbound_network` is
+  available, the public IPs a *dry-run* CBI policy would have blocked (`access_type=DRY_RUN_DENIAL`)
+  are folded into the candidate set — the inbound clients your log-only allow-list doesn't yet cover
+  — so you can stand up a restricted dry-run ingress policy, observe, and complete the allow-list from
+  what it would have denied. Best-effort; `--no-include-inbound-network` opts out.
+- **Partner platforms.** Observed inbound IPs that fall in a known partner-platform range (Power BI,
+  dbt platform) are labelled as that partner and recommended for allow-listing. Databricks' own
+  managed "Partner platforms" ingress source (Beta; AWS + GCP) maintains these lists for you and is
+  the cleaner option — the CLI flags it, but since the SDK can't set that source yet, matched IPs are
+  emitted as labelled CIDR allow-rules.
 - **Ingress shows no candidate IPs?** The CLI prints a diagnostic funnel explaining where the audit
   rows dropped out. The usual causes: the workspace uses **PrivateLink/NAT** (the audit log records
   the relay's private IP, not the user's public IP — a source-IP allow-list can't be built from

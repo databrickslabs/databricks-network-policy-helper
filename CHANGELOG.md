@@ -13,6 +13,36 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+### Added
+
+- **Front-end PrivateLink is now handled, not refused.** `ingress` no longer aborts on a PrivateLink
+  workspace. On AWS/GCP it reads the workspace's Private Access Settings (PAS) and offers to mirror
+  it into the policy's `private_access` block — `ACCOUNT` level → allow all registered endpoints;
+  `ENDPOINT` level → the specific allowed endpoint ids, mapped across as-is. A **private-only**
+  workspace (public access disabled) skips the (moot) public source-IP allow-list and builds a
+  private-access-only policy. Azure has no PAS object to read, so the CLI flags it and asks you to
+  verify front-end Private Link yourself.
+- **Partner-platform IP detection.** Observed inbound IPs are matched against published partner
+  ranges — **Power BI** (dynamic, from the Azure Service Tags `PowerBI` tag) and **dbt platform**
+  (curated) — labelled as that partner and recommended for allow-listing. The CLI also points you at
+  Databricks' managed "Partner platforms" ingress source (Beta; AWS + GCP) as a cleaner, self-
+  updating alternative to pinning the CIDRs. (Tableau Cloud is wired up but ships no ranges yet,
+  pending a confirmed source.) `feeds list` / `refresh` include the new `partner_ranges` feed.
+- **`system.access.inbound_network` as an allow-list candidate source.** `ingress` now folds the
+  public IPs a *dry-run* CBI policy would have denied (`access_type=DRY_RUN_DENIAL`) into the
+  candidate set — the inbound clients your log-only allow-list doesn't cover yet. Enforced denials
+  (`DROP`) continue to feed the recently-denied view. Best-effort; `--no-include-inbound-network`
+  opts out.
+
+### Changed
+
+- **Cross-workspace access is left in compatibility mode (with a heads-up).** `ingress` no longer
+  aborts when the assigned policy has cross-workspace (or private-access) rules. A same-id update
+  preserves those blocks untouched; a new-id rebind warns instead of clobbering. This tool doesn't
+  build cross-workspace rules yet (no reliable per-workspace signal in the system tables).
+- **Minimum `databricks-sdk` is now 0.152.0** (for the `private_access` / `cross_workspace_access`
+  CBI dataclasses).
+
 ## [0.3.0] - 2026-09-30
 
 ### Changed

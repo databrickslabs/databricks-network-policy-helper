@@ -78,6 +78,10 @@ class IngressConfig:
     treat_null_status_as_success: bool = False
     include_ipv6: bool = False
     include_account_level: bool = False
+    # Also mine system.access.inbound_network for public IPs a dry-run CBI policy would have denied
+    # (access_type=DRY_RUN_DENIAL) and fold them into the allow-list candidate set. Best-effort — the
+    # table exists only where network monitoring is enabled; absent/empty degrades silently.
+    include_inbound_network: bool = True
     # Enrichment
     threat_feeds: list[str] = field(default_factory=lambda: list(THREAT_FEEDS))
     enable_rdap: bool = True
@@ -102,6 +106,15 @@ class IngressConfig:
     # (_reconcile_ip_acls); defaults to True so a --yes / non-interactive run migrates them.
     migrate_ip_acls: bool = True
     deny_denied_ips: bool = False
+    # Front-end PrivateLink (private access) migration, populated by the CLI from the workspace's
+    # Private Access Settings (PAS). None = no PAS / not migrating; otherwise
+    # {"mode": "ACCOUNT"|"ENDPOINT", "endpoint_ids": [...]} — mapped straight into a CBI private_access
+    # block (see core.policy.build_private_access_block). Azure has no PAS, so this stays None there
+    # and the CLI prints a flag instead.
+    private_access: dict | None = None
+    # When the workspace is private-only (PAS public_access_enabled=False), skip the public source-IP
+    # allow-list (it's moot — public access is disabled) and build a private-access-only policy.
+    skip_public_ingress: bool = False
     # Interactively pick which proposed allow rules to keep (checkbox), before they're built. On by
     # default in interactive runs; skipped under --yes / non-interactive or with --no-select-rules.
     select_rules: bool = True

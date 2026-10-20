@@ -116,16 +116,27 @@ Before any analysis or write, the CLI shows the **target workspace** (profile / 
 you to confirm it — so a mis-set `--profile` can't act on the wrong workspace (skip with `--yes`).
 
 **Pre-checks (create + assign only).** When the run will create **and** assign a single policy, the
-CLI first checks the target workspace and **aborts** if it can't safely stand up a public-IP policy:
-PrivateLink (a PAS) is configured; the assigned policy has **private-access / cross-workspace** rules
-(which this command doesn't build and can't yet preserve); or it already **enforces** restrictive
-public ingress. A restrictive *dry-run* public policy only warns (assigning replaces it), and an
-allow-all policy (e.g. the account's `default-policy`) is fine. It also guards the **opposite
+CLI first checks the target workspace and **aborts** if the assigned policy already **enforces**
+restrictive public ingress. A restrictive *dry-run* public policy only warns (assigning replaces it),
+and an allow-all policy (e.g. the account's `default-policy`) is fine. It also guards the **opposite
 direction**: if creating the policy under a **new** id would rebind the workspace and drop an
 existing restrictive **egress** on the assigned policy (the new policy carries a `FULL_ACCESS` egress
 default), it aborts on an enforced egress (warns on a dry-run one) — use `add_to_existing` to keep
-it. Updating the same id in place preserves the other direction. Skipped for `per_workspace` and
-`add_to_existing`.
+it. A new-id rebind that would drop the assigned policy's **private-access / cross-workspace** config
+now warns (pointing at `add_to_existing`) rather than aborting. Updating the same id in place
+preserves the other direction and those sub-blocks. Skipped for `per_workspace` and `add_to_existing`.
+
+**Front-end PrivateLink (private access).** A PrivateLink workspace is no longer refused. On AWS/GCP
+the CLI reads the workspace's Private Access Settings (PAS) and offers to mirror it into the policy's
+`private_access` block — PAS level `ACCOUNT` → allow all registered endpoints; level `ENDPOINT` → the
+specific allowed endpoint ids, mapped across as-is. A **private-only** workspace (public access
+disabled) skips the moot public source-IP allow-list and builds a private-access-only policy. **Azure**
+has no PAS object to read, so the CLI flags it and asks you to verify front-end Private Link yourself.
+Needs account-admin auth (to read the PAS), so it's a no-op on a propose-only run without one.
+
+**Cross-workspace access** is left in **compatibility mode** (the account default) — this tool doesn't
+build cross-workspace rules yet, and any existing cross-workspace config is preserved untouched on a
+same-id update.
 
 `add_to_existing` updates only the ingress block and **leaves an existing egress as-is**; a brand-new
 policy gets a permissive `FULL_ACCESS` egress default (and, symmetrically, the egress helper leaves
@@ -151,9 +162,22 @@ the traffic-derived rules. Non-interactive / `--yes` runs migrate them all. Obse
 always included.
 
 The CLI also surfaces requests **recently blocked inbound** — both IP-access-list 403s
-(`system.access.audit`) and CBI network-policy denials (`system.access.inbound_network`, when that
-table is available/non-empty; it degrades cleanly if not). Pass `--deny-denied-ips` to turn those
-source IPs into explicit deny rules (labelled `deny-recently-denied`).
+(`system.access.audit`) and **enforced** CBI network-policy denials (`system.access.inbound_network`
+`access_type=DROP`, when that table is available/non-empty; it degrades cleanly if not). Pass
+`--deny-denied-ips` to turn those source IPs into explicit deny rules (labelled `deny-recently-denied`).
+
+**Dry-run CBI denials as allow-list candidates.** When `system.access.inbound_network` is available,
+the public IPs a *dry-run* CBI policy would have blocked (`access_type=DRY_RUN_DENIAL`) are folded
+into the candidate set — the inbound clients your log-only allow-list doesn't yet cover. So you can
+stand up a restricted dry-run ingress policy, let it observe, and complete the allow-list from what it
+would have denied. On by default (best-effort); `--no-include-inbound-network` opts out.
+
+**Partner platforms.** Observed inbound IPs matching a known partner-platform range (**Power BI**,
+**dbt platform**; Tableau Cloud pending a confirmed source) are labelled as that partner and
+recommended for allow-listing — kept as labelled CIDR allow rules. The CLI also flags Databricks'
+managed **"Partner platforms"** ingress source (Beta; AWS + GCP), which maintains these IP lists for
+you and is the cleaner option; it's console/Terraform-only (the SDK can't set it yet), so enable it on
+the account console Previews page and add the source on the policy's Ingress tab.
 
 Once the CBI policy replaces the old IP access list, pass `--disable-existing-ip-acls` (off by
 default) to turn the workspace's IP access lists off (`enableIpAccessLists=false`) so both controls
@@ -178,7 +202,10 @@ allow rules, a catch-all allow is added so non-denied traffic is still permitted
 ## Feeds
 
 Enrichment feeds are cached locally with a TTL. `dbx-nwp-helper feeds list` shows the cache;
-`feeds refresh` forces a re-download; the analysis commands accept `--refresh-feeds`.
+`feeds refresh` forces a re-download; the analysis commands accept `--refresh-feeds`. Feeds include
+threat-intel, cloud-provider and Databricks ranges, and **partner-platform ranges** (`partner_ranges`
+— Power BI dynamic via the Azure Service Tags `PowerBI` tag, dbt platform curated; Tableau Cloud
+pending a source).
 
 ## References
 

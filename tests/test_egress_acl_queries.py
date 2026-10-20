@@ -696,6 +696,56 @@ def test_workspace_pas_attached_none_on_error():
     assert acl_core.workspace_pas_attached(acct, 42) is None
 
 
+def _pas_full_account(pas_id, *, level="ACCOUNT", endpoint_ids=None, public_enabled=True):
+    class _WS:
+        def get(self, workspace_id):
+            return type("W", (), {"private_access_settings_id": pas_id})()
+
+    class _PA:
+        def get(self, private_access_settings_id):
+            return type(
+                "PAS",
+                (),
+                {
+                    "private_access_level": type("E", (), {"value": level})(),
+                    "allowed_vpc_endpoint_ids": endpoint_ids,
+                    "public_access_enabled": public_enabled,
+                },
+            )()
+
+    return type("Acct", (), {"workspaces": _WS(), "private_access": _PA()})()
+
+
+def test_read_private_access_settings_account_level():
+    pas = acl_core.read_private_access_settings(_pas_full_account("pas-1"), 42)
+    assert pas["level"] == "ACCOUNT"
+    assert pas["endpoint_ids"] == []
+    assert pas["public_access_enabled"] is True
+
+
+def test_read_private_access_settings_endpoint_level_private_only():
+    acct = _pas_full_account(
+        "pas-2", level="ENDPOINT", endpoint_ids=["vpce-a", "vpce-b"], public_enabled=False
+    )
+    pas = acl_core.read_private_access_settings(acct, 42)
+    assert pas["level"] == "ENDPOINT"
+    assert pas["endpoint_ids"] == ["vpce-a", "vpce-b"]
+    assert pas["public_access_enabled"] is False
+
+
+def test_read_private_access_settings_none_when_no_pas():
+    assert acl_core.read_private_access_settings(_pas_full_account(None), 42) is None
+
+
+def test_read_private_access_settings_none_on_error():
+    class _WS:
+        def get(self, workspace_id):
+            raise RuntimeError("no perms")
+
+    acct = type("Acct", (), {"workspaces": _WS()})()
+    assert acl_core.read_private_access_settings(acct, 42) is None
+
+
 def _policy_account(assigned_policy_id, policy_obj):
     class _WNC:
         def get_workspace_network_option_rpc(self, workspace_id):
@@ -808,8 +858,22 @@ def test_inbound_network_denied_query_shape():
     assert "system.access.inbound_network" in q
     assert "source.ip AS source_ip" in q  # the CBI source IP lives in the source struct
     assert "INTERVAL 21 DAYS" in q
+    assert "access_type = 'DROP'" in q  # only enforced denials feed the recently-denied view
+    assert "DRY_RUN_DENIAL" not in q  # dry-run would-be-denials are candidates, not denials
     # same output columns as denied_requests(), so the two frames union cleanly
     for col in ("denied_events", "principals", "principal_list", "first_denied", "last_denied"):
+        assert col in q
+
+
+def test_candidate_ips_from_inbound_network_query_shape():
+    q = queries.candidate_ips_from_inbound_network(14, min_events=3)
+    assert "system.access.inbound_network" in q
+    assert "access_type = 'DRY_RUN_DENIAL'" in q  # would-be-denied under a dry-run policy
+    assert "INTERVAL 14 DAYS" in q
+    assert "HAVING COUNT(*) >= 3" in q
+    # shaped like frequent_public_ips so the rows merge into the candidate set
+    assert "source.ip AS public_ip" in q
+    for col in ("events", "principals", "principal_list", "first_active_date", "last_active_date"):
         assert col in q
 
 

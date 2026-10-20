@@ -740,48 +740,24 @@ def _export_policy(path: str, payload: dict, yes: bool = False) -> None:
 
 
 def _ingress_preflight(account, workspace_id, new_policy_id: str, yes: bool) -> None:
-    """ingress create-and-assign pre-checks. Aborts when we can't safely stand up a public-IP CBI
-    policy for the workspace:
-      * PrivateLink (PAS) configured on the workspace;
-      * the assigned policy has private-access / cross-workspace rules (which this command doesn't
-        build and can't yet preserve);
+    """ingress create-and-assign pre-checks. Aborts when we can't safely stand up a CBI policy for
+    the workspace:
       * the assigned policy already ENFORCES restrictive public ingress;
       * assigning a *new* policy (a different id) would drop an existing restrictive egress on the
         assigned policy (the new policy carries a FULL_ACCESS egress default).
-    A restrictive *dry-run* public ingress (or egress we'd drop) just warns. Called only when the run
-    will create AND assign a single policy — never for per_workspace or add_to_existing."""
+    A restrictive *dry-run* public ingress (or egress we'd drop) just warns. Front-end PrivateLink is
+    now handled up front (_reconcile_private_access mirrors the workspace's PAS into a private_access
+    block), and cross-workspace access is left in compatibility mode and preserved on same-id updates
+    (apply_ingress) — so neither aborts here; a new-id rebind that would drop the assigned policy's
+    private-access / cross-workspace config just warns. Called only when the run will create AND
+    assign a single policy — never for per_workspace or add_to_existing."""
     from .core import acl as acl_core
-
-    pas = acl_core.workspace_pas_attached(account, workspace_id)
-    if pas is True:
-        console.banner(
-            "danger",
-            "This workspace has PrivateLink (a PAS object) configured. Building "
-            "a CBI ingress policy for a PrivateLink workspace is NOT supported "
-            "yet - aborting.",
-        )
-        raise typer.Exit(code=1)
-    if pas is None:
-        console.banner(
-            "warn",
-            "Couldn't verify whether PrivateLink (PAS) is configured (account "
-            "read failed). If this workspace uses PrivateLink, this is NOT "
-            "supported yet.",
-        )
 
     pid, pol = acl_core.assigned_policy(account, workspace_id)
     if pol is None:
         return
     ing = getattr(pol, "ingress", None)
     dry = getattr(pol, "ingress_dry_run", None)
-    if acl_core.private_or_xws_restrictive(ing) or acl_core.private_or_xws_restrictive(dry):
-        console.banner(
-            "danger",
-            f"The policy assigned to this workspace ('{pid}') has private-access "
-            "or cross-workspace rules, which this command can't preserve yet - "
-            "aborting.",
-        )
-        raise typer.Exit(code=1)
     if acl_core.public_restrictive(ing):
         console.banner(
             "danger",
@@ -796,9 +772,18 @@ def _ingress_preflight(account, workspace_id, new_policy_id: str, yes: bool) -> 
             "DRY-RUN public ingress (not enforced) — assigning the new policy will "
             "replace it.",
         )
-    # Opposite direction: a new policy id rebinds the workspace, dropping the assigned policy's egress
-    # (the new policy defaults to FULL_ACCESS egress). Updating the *same* id preserves it, so skip.
+    # Opposite direction + private/cross-workspace: a new policy id rebinds the workspace away from
+    # the assigned policy, dropping blocks a same-id update would have preserved. Warn (don't abort)
+    # for private-access / cross-workspace, and defer to the egress guard for the egress block.
     if new_policy_id and new_policy_id != pid:
+        if acl_core.private_or_xws_restrictive(ing) or acl_core.private_or_xws_restrictive(dry):
+            console.banner(
+                "warn",
+                f"The policy assigned to this workspace ('{pid}') has private-access or "
+                "cross-workspace rules. Creating a NEW policy id rebinds the workspace and won't "
+                f"carry them over — use --policy-action add_to_existing --existing-policy-id {pid} "
+                "to keep them, or re-run with the same policy name to update in place.",
+            )
         _warn_or_abort_dropped_egress(acl_core, pid, getattr(pol, "egress", None), "ingress")
 
 
@@ -960,6 +945,109 @@ def _confirm_overwrite_policy(account, policy_id: str, direction: str, yes: bool
     ):
         console.banner("info", "Aborted — nothing written.")
         raise typer.Exit(code=0)
+
+
+def _reconcile_private_access(account, workspace_id, wc, cfg: IngressConfig, yes: bool) -> None:
+    """Detect front-end PrivateLink on the workspace and, where possible, mirror it into the CBI
+    policy's private_access block so applying the policy doesn't drop inbound private connectivity.
+
+    * AWS/GCP: read the workspace's Private Access Settings (PAS). If present (a PrivateLink
+      workspace), offer to carry it across — ACCOUNT level → allow all registered endpoints;
+      ENDPOINT level → the specific allowed endpoint ids, mapped as-is. If the PAS has public access
+      disabled (private-only), also skip the public source-IP allow-list (it's moot). Sets
+      cfg.private_access / cfg.skip_public_ingress.
+    * Azure: there is no PAS object to read, so just flag it — the user should verify whether
+      front-end Private Link is configured and handle the private_access side themselves.
+
+    Needs an account client (account admin); a no-op when one isn't available (propose-only without
+    account creds can't read the PAS)."""
+    from .core import acl as acl_core
+    from .core import egress as eg
+
+    cloud = eg.workspace_cloud_from_host(getattr(getattr(wc, "config", None), "host", None))
+    if cloud == "azure":
+        console.banner(
+            "warn",
+            "This looks like an Azure workspace. Azure has no Private Access Settings object the CLI "
+            "can read, so it can't auto-detect front-end Private Link here. If this workspace uses "
+            "front-end Private Link, verify its configuration and add a private-access rule yourself "
+            "(account console → the policy's Ingress tab → Private network access) — otherwise "
+            "applying a restrictive public ingress policy alone won't affect private connectivity.",
+        )
+        return
+    if account is None:
+        return  # can't read the PAS without account-admin creds (propose-only without account)
+
+    pas = acl_core.read_private_access_settings(account, workspace_id)
+    if not pas:
+        return  # not a PrivateLink workspace (no PAS) — nothing to mirror
+
+    level = pas["level"]
+    endpoint_ids = pas["endpoint_ids"]
+    private_only = not pas["public_access_enabled"]
+    if level == "ENDPOINT" and endpoint_ids:
+        desc = f"allow {len(endpoint_ids)} specific registered endpoint(s): {', '.join(endpoint_ids)}"
+    else:
+        desc = "allow all registered endpoints (ACCOUNT level)"
+    public_note = (
+        "Public access is DISABLED (private-only workspace)." if private_only else "Public access is enabled."
+    )
+    console.banner(
+        "info",
+        f"Front-end PrivateLink detected (PAS '{pas['pas_id']}'): {desc}. {public_note}",
+    )
+
+    if _interactive(yes) and not typer.confirm(
+        typer.style("Mirror this PrivateLink config into the policy's private-access block?", fg="yellow"),
+        default=True,
+    ):
+        console.banner(
+            "info",
+            "Skipping private-access — the policy will not include a private_access block. Note a "
+            "restrictive public-only policy won't govern private connectivity.",
+        )
+        return
+
+    cfg.private_access = {"mode": level, "endpoint_ids": endpoint_ids}
+    if private_only:
+        cfg.skip_public_ingress = True
+        console.banner(
+            "info",
+            "Private-only workspace — skipping the public source-IP allow-list (public access is "
+            "disabled, so it's moot) and building a private-access-only policy.",
+        )
+
+
+def _note_partner_platforms(analysis) -> None:
+    """When observed IPs fall in a known partner-platform (Power BI / dbt / Tableau) range, flag it:
+    those groups are recommended for allow-listing, and Databricks' console/Terraform now offers a
+    self-maintaining 'Partner platforms' network source (Beta; AWS + GCP) that's cleaner than pinning
+    the raw CIDRs — but the SDK this tool writes with can't set it, so they go in as labelled CIDR
+    allow-rules here."""
+    partners = sorted({p for r in (analysis.suggestion_rows or []) for p in (r.get("partners") or [])})
+    if not partners:
+        return
+    console.banner(
+        "info",
+        f"Observed inbound traffic from partner platform(s): {', '.join(partners)}. These are "
+        "allow-listed as labelled CIDR rules. Databricks also offers a managed 'Partner platforms' "
+        "ingress source (Beta, AWS + GCP — Power BI / Tableau Cloud / dbt platform) that maintains "
+        "these IP lists for you; enable it on the account console Previews page and add the source "
+        "on the policy's Ingress tab for a cleaner, self-updating alternative to pinning the CIDRs.",
+    )
+
+
+def _note_cross_workspace_compat(yes: bool) -> None:
+    """Flag that cross-workspace access is left in compatibility mode. This tool doesn't build
+    cross-workspace rules yet (there's no reliable per-workspace source signal in the system tables),
+    so new policies default to compatibility mode and existing cross-workspace config is preserved
+    untouched on same-id updates (apply_ingress)."""
+    console.banner(
+        "info",
+        "Cross-workspace access is left in compatibility mode (the account default) — this tool "
+        "doesn't build cross-workspace ingress/egress rules yet. Any existing cross-workspace config "
+        "on the policy is preserved unchanged.",
+    )
 
 
 def _checkpoint(yes: bool) -> None:
@@ -1231,6 +1319,12 @@ def ingress(
         help="Include account-level (workspace_id=0) audit rows (default off; these are "
         "account console / SCIM traffic, not workspace-scoped).",
     ),
+    include_inbound_network: bool = typer.Option(
+        True,
+        help="Also use system.access.inbound_network dry-run denials (access_type=DRY_RUN_DENIAL) as "
+        "allow-list candidates — public inbound clients a log-only CBI policy would block but the "
+        "allow-list doesn't yet cover. Best-effort; on by default, --no-include-inbound-network to skip.",
+    ),
     threat_feeds: str | None = typer.Option(
         None, help="Comma-separated feeds (default: all). See `feeds list`."
     ),
@@ -1304,6 +1398,7 @@ def ingress(
         treat_null_status_as_success=treat_null_status_as_success,
         include_ipv6=include_ipv6,
         include_account_level=include_account_level,
+        include_inbound_network=include_inbound_network,
         threat_feeds=feeds,
         enable_rdap=enable_rdap,
         rdap_workers=rdap_workers,
@@ -1607,6 +1702,8 @@ def feeds_refresh():
         loaders.cloud_ranges(refresh=True)
     with console.status("Refreshing Databricks ranges…"):
         loaders.databricks_ranges(refresh=True)
+    with console.status("Refreshing partner-platform ranges…"):
+        loaders.partner_ranges(refresh=True)
     console.banner("success", "Feed cache refreshed.")
 
 
@@ -1765,9 +1862,13 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         analysis = _run_analysis(lambda: ing.analyze(cfg, sconn, wc, on_step=_step, status=console.status))
 
     render.ingress_analysis(analysis, cfg)
+    _note_partner_platforms(analysis)
     _checkpoint(yes)
     # Auto-detect the workspace's IP access lists and confirm whether to migrate them into the policy.
     _reconcile_ip_acls(analysis, cfg, yes)
+    # Detect front-end PrivateLink (PAS) and mirror it into a private_access block (AWS/GCP), or flag
+    # it on Azure. Needs an account client, so it's a no-op on a propose-only run without one.
+    _reconcile_private_access(account, this_ws, wc, cfg, yes)
     # Optionally let the user cull the proposed allow rules before they're built (and before SCIM).
     _select_ingress_rules(analysis, cfg, yes)
 
@@ -1783,6 +1884,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     render.ingress_preview(previews, cfg, analysis)
     if previews:
         console.responsibility_warning("source IP addresses / CIDRs")
+        _note_cross_workspace_compat(yes)
     _confirm_truncation(analysis.truncations, yes)
 
     if cfg.export:
@@ -1797,7 +1899,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     if not cfg.apply.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
         return
-    if not _has_rules(policies):
+    if not _has_rules(policies) and not cfg.private_access:
         console.banner(
             "danger",
             "Nothing to apply — the analysis produced no ingress rules, so no "

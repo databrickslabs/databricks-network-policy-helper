@@ -119,6 +119,7 @@ def test_enrich_candidates_reports_rdap_progress(monkeypatch):
         [],
         [],
         [],
+        [],
         on_progress=lambda done, total, ip: calls.append((done, total, ip)),
     )
     assert calls == [(1, 3, "8.8.8.8"), (2, 3, "1.1.1.1"), (3, 3, "9.9.9.9")]
@@ -211,6 +212,7 @@ def test_enrich_skips_rdap_for_known_cloud_and_databricks(monkeypatch):
         [],  # threat ranges
         cloud_ranges,
         dbx_ranges,
+        [],  # partner ranges
     )
     assert calls == ["8.8.8.8"]  # only the unknown IP hit the network
     owners = {r["public_ip"]: r["rdap_owner_name"] for r in enriched}

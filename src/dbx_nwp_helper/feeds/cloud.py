@@ -17,6 +17,22 @@ from .util import dedupe, valid_cidr
 CLOUD_COLUMNS = ["cidr", "provider", "service", "region", "loaded_at"]
 
 
+def fetch_azure_service_tags() -> dict | None:
+    """The Azure 'IP Ranges and Service Tags – Public Cloud' JSON, or None if it couldn't be fetched.
+    There's no stable direct URL — Microsoft publishes a weekly dated file — so scrape the official
+    download page for the current `ServiceTags_Public_<date>.json` link and fetch the newest. Shared
+    by the cloud-provider ranges and the partner-platform feed (Power BI lives in this same JSON)."""
+    conf_page = http_get("https://www.microsoft.com/en-us/download/details.aspx?id=56519")
+    if not conf_page:
+        return None
+    matches = re.findall(
+        r"https://download\.microsoft\.com/download/[^\"']*ServiceTags_Public_\d+\.json", conf_page
+    )
+    if not matches:
+        return None
+    return http_get(sorted(set(matches))[-1], as_json=True)
+
+
 def load_cloud_ranges() -> pd.DataFrame:
     now = datetime.now(timezone.utc)
     rows = []
@@ -49,14 +65,7 @@ def load_cloud_ranges() -> pd.DataFrame:
                     rows.append((cidr, "oracle", ",".join(cidr_obj.get("tags", []) or []), rname, now))
 
     # Azure Service Tags — scrape Microsoft's official download page for the current dated JSON.
-    azure_json = None
-    conf_page = http_get("https://www.microsoft.com/en-us/download/details.aspx?id=56519")
-    if conf_page:
-        matches = re.findall(
-            r"https://download\.microsoft\.com/download/[^\"']*ServiceTags_Public_\d+\.json", conf_page
-        )
-        if matches:
-            azure_json = http_get(sorted(set(matches))[-1], as_json=True)
+    azure_json = fetch_azure_service_tags()
     if azure_json:
         for v in azure_json.get("values", []):
             props = v.get("properties", {})

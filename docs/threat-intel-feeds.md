@@ -63,6 +63,24 @@ the same control-plane CIDRs published per-region at the HTML docs
 scraping is needed. SCC-relay FQDNs (`tunnel.*`) are not in the feed but matter only for customer
 egress allow-listing, not ingress source-IP analysis.
 
+## Partner-platform ranges (`partner_ranges` table)
+
+Columns: `cidr, partner, region, source_url, loaded_at`. The egress IPs that named SaaS partner
+platforms connect to Databricks *from*. An observed inbound source IP inside one of these is labelled
+as that partner and recommended for allow-listing (the platform, not a person, is reaching in).
+
+| Partner | partner | Source | Notes |
+|---|---|---|---|
+| Power BI | `Power BI` | the Azure Service Tags JSON (`PowerBI` + `PowerBI.<region>` tags), via `microsoft.com/.../details.aspx?id=56519` | **dynamic** — reuses the same official feed as the cloud ranges; no auth |
+| dbt platform | `dbt platform` | `docs.getdbt.com/docs/cloud/about-cloud/access-regions-ip-addresses` | **curated** in-repo (no machine feed); keep `_DBT_LAST_VERIFIED` current when refreshing |
+| Tableau Cloud | `Tableau Cloud` | — | **deferred** — ships no ranges yet, pending a confirmed published-allowlist source; the loader slot is wired up |
+
+Databricks' own managed **"Partner platforms"** context-based-ingress source (Beta; AWS + GCP; Power
+BI / Tableau Cloud / dbt platform) maintains these lists for you and is the cleaner option. It is
+**not exposed by the SDK** this tool writes with (console / Terraform only), so matched partner IPs
+are emitted as ordinary labelled CIDR allow-rules and the CLI advises enabling the managed source.
+Verify current licensing before any external redistribution of the curated lists.
+
 ## VPN / SASE ranges — intentionally not included
 Enterprise SASE/SWG vendors (Zscaler, Palo Alto Prisma, Cisco Umbrella, Netskope) do **not** publish
 ungated IP lists. Consumer VPNs don't publish official lists either. The only free/ungated options
