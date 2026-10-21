@@ -11,9 +11,12 @@ license = { file = "LICENSE.md" }
 authors = [{ name = "Andrew Weaver" }]
 keywords = ["databricks", "network-policy", "cbi", "seg", "security", "cli"]
 dependencies = [
-    # databricks-sdk >= 0.113.0 is required for the Context-Based Ingress (CBI) policy
-    # dataclasses (CustomerFacingIngressNetworkPolicy*).
-    "databricks-sdk>=0.113.0",
+    # databricks-sdk >= 0.152.0 is required for the Context-Based Ingress (CBI) policy
+    # dataclasses used here: the public_access allow/deny rules (>= 0.113.0), plus the
+    # private_access (CustomerFacingIngressNetworkPolicyPrivateAccess + PrivateRequestOrigin /
+    # Endpoints) and cross_workspace_access (…CrossWorkspaceAccess, LEGACY_MODE) blocks that the
+    # front-end-PrivateLink and cross-workspace handling depend on, which don't exist in 0.113.0.
+    "databricks-sdk>=0.152.0",
     "databricks-sql-connector>=3.0.0",
     "typer>=0.12.0",
     "rich>=13.7.0",

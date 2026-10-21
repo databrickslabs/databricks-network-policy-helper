@@ -12,20 +12,67 @@ The verbatim IP-ACL → CBI *migration* engine now lives in its own tool,
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 Note = Callable[[str], None]
 
 
-def workspace_pas_attached(account, workspace_id) -> bool | None:
-    """True if the workspace has a Private Access Settings (PAS) object attached — i.e. it uses
-    (AWS/GCP) PrivateLink. None if it couldn't be determined (Azure workspaces have no PAS, so this
-    returns False there). Best-effort so a read failure degrades to a warning rather than a crash."""
+@dataclass
+class PrivateAccessPlan:
+    """A workspace's front-end PrivateLink (its Private Access Settings) mapped to a CBI
+    `private_access` block, so AWS/GCP PrivateLink can be recreated when building a CBI policy:
+      * private_access_level=ACCOUNT  -> ALLOW_ALL_REGISTERED_ENDPOINTS (any registered endpoint);
+      * private_access_level=ENDPOINT -> RESTRICTED_ACCESS listing the PAS's allowed endpoint ids.
+    The label is the PAS name verbatim when it has one, else a generic fallback."""
+
+    restriction_mode: str  # "ALLOW_ALL_REGISTERED_ENDPOINTS" | "RESTRICTED_ACCESS"
+    endpoint_ids: list[str] = field(default_factory=list)
+    label: str = "registered-private-endpoints"
+    source_pas_id: str | None = None
+
+
+def read_workspace_pas(account, workspace_id, ws: object | None = None) -> tuple[object | None, str]:
+    """Fetch the workspace's Private Access Settings (PAS) object — the source of truth for AWS/GCP
+    front-end PrivateLink. Returns (pas, status) where status is:
+      * 'none'  — no PAS attached (no front-end PrivateLink; migrate public only);
+      * 'ok'    — PAS read (`pas` is the object to map into a private_access block);
+      * 'error' — the account read failed (caller warns; PrivateLink can't be migrated).
+    Separating 'none' from 'error' matters: a workspace with genuinely no PrivateLink migrates
+    cleanly, while an unreadable account warns rather than silently dropping a private rule. Pass `ws`
+    to reuse an already-fetched workspace object. Best-effort."""
     try:
-        ws = account.workspaces.get(workspace_id=int(workspace_id))
-        return bool(getattr(ws, "private_access_settings_id", None))
-    except Exception:  # noqa: BLE001 - couldn't determine; caller warns
-        return None
+        if ws is None:
+            ws = account.workspaces.get(workspace_id=int(workspace_id))
+    except Exception:  # noqa: BLE001 - couldn't read the workspace; caller warns
+        return None, "error"
+    pas_id = getattr(ws, "private_access_settings_id", None)
+    if not pas_id:
+        return None, "none"
+    try:
+        return account.private_access.get(private_access_settings_id=pas_id), "ok"
+    except Exception:  # noqa: BLE001 - PAS id present but unreadable; caller warns
+        return None, "error"
+
+
+def plan_from_pas(pas) -> PrivateAccessPlan:
+    """Map a Private Access Settings object to a PrivateAccessPlan (the CBI private_access block to
+    build): ACCOUNT level -> allow-all-registered; ENDPOINT level -> the enumerated allowed endpoint
+    ids, with the PAS name kept as the rule label verbatim."""
+    level = getattr(pas, "private_access_level", None)
+    level_val = str(getattr(level, "value", level) or "").upper()
+    pas_id = getattr(pas, "private_access_settings_id", None)
+    label = getattr(pas, "private_access_settings_name", None) or "registered-private-endpoints"
+    if level_val == "ENDPOINT":
+        ids = list(getattr(pas, "allowed_vpc_endpoint_ids", None) or [])
+        return PrivateAccessPlan(
+            restriction_mode="RESTRICTED_ACCESS", endpoint_ids=ids, label=label, source_pas_id=pas_id
+        )
+    # ACCOUNT (or an unspecified level) means any endpoint registered in the account is accepted.
+    return PrivateAccessPlan(
+        restriction_mode="ALLOW_ALL_REGISTERED_ENDPOINTS", label=label, source_pas_id=pas_id
+    )
 
 
 def _block_restrictive(blk) -> bool:
@@ -40,18 +87,77 @@ def _block_restrictive(blk) -> bool:
     return bool(getattr(blk, "allow_rules", None) or getattr(blk, "deny_rules", None))
 
 
+def block_restrictive(block) -> bool:
+    """True if a single ingress sub-block (a public_access / private_access / cross_workspace_access
+    object) restricts traffic. Used to decide, per dimension, whether an existing CBI block collides
+    with what a migration would write (public and private are independent)."""
+    return _block_restrictive(block)
+
+
 def public_restrictive(ingress) -> bool:
     """True if the ingress block's public_access (source-IP) sub-block is restrictive."""
     return ingress is not None and _block_restrictive(getattr(ingress, "public_access", None))
 
 
+def private_restrictive(ingress) -> bool:
+    """True if the ingress block's private_access (front-end PrivateLink) sub-block is restrictive."""
+    return ingress is not None and _block_restrictive(getattr(ingress, "private_access", None))
+
+
+def cross_workspace_restrictive(ingress) -> bool:
+    """True if the ingress block's cross_workspace_access sub-block is restrictive. (LEGACY_MODE —
+    compatibility — and FULL_ACCESS are not restrictive.)"""
+    return ingress is not None and _block_restrictive(getattr(ingress, "cross_workspace_access", None))
+
+
 def private_or_xws_restrictive(ingress) -> bool:
     """True if the ingress block's private_access (PrivateLink) or cross_workspace_access sub-block
-    is restrictive — the parts the public-IP helpers don't build and can't yet preserve."""
-    if ingress is None:
-        return False
-    return _block_restrictive(getattr(ingress, "private_access", None)) or _block_restrictive(
-        getattr(ingress, "cross_workspace_access", None)
+    is restrictive."""
+    return private_restrictive(ingress) or cross_workspace_restrictive(ingress)
+
+
+def _ingress_restrictive(ingress) -> bool:
+    """True if an ingress block restricts traffic in any dimension (public / private / cross-ws)."""
+    return public_restrictive(ingress) or private_or_xws_restrictive(ingress)
+
+
+def _active_ingress(pol):
+    """The ingress block that carries a policy's rules — prefer a *restrictive* enforced `ingress`,
+    then a restrictive `ingress_dry_run` (a policy has one enforcement mode, so its rules live in one
+    or the other), else whichever is present. None if neither is."""
+    ing = getattr(pol, "ingress", None)
+    if ing is not None and _ingress_restrictive(ing):
+        return ing
+    dry = getattr(pol, "ingress_dry_run", None)
+    if dry is not None and _ingress_restrictive(dry):
+        return dry
+    return ing if ing is not None else dry
+
+
+def existing_cbi_ingress(
+    account, workspace_id
+) -> tuple[str | None, object | None, object | None, object | None]:
+    """The workspace's currently-assigned CBI policy's ingress sub-blocks, deep-copied so they can be
+    carried verbatim into the generated policy for any dimension this run doesn't itself produce.
+    Returns (assigned_policy_id, public_access, private_access, cross_workspace_access); (id, None,
+    None, None) when nothing is assigned / unreadable. Only *restrictive* sub-blocks are returned —
+    a permissive one (FULL_ACCESS / ALLOW_ALL_REGISTERED_ENDPOINTS, e.g. the baseline default-policy)
+    is equivalent to omitting it, so dropping it keeps the generated policy clean and never silently
+    re-adds an allow-all block. Best-effort."""
+    policy_id, pol = assigned_policy(account, workspace_id)
+    if pol is None:
+        return policy_id, None, None, None
+    ing = _active_ingress(pol)
+    if ing is None:
+        return policy_id, None, None, None
+    pub = getattr(ing, "public_access", None)
+    priv = getattr(ing, "private_access", None)
+    xws = getattr(ing, "cross_workspace_access", None)
+    return (
+        policy_id,
+        copy.deepcopy(pub) if _block_restrictive(pub) else None,
+        copy.deepcopy(priv) if _block_restrictive(priv) else None,
+        copy.deepcopy(xws) if _block_restrictive(xws) else None,
     )
 
 

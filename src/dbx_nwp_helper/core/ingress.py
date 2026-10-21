@@ -104,6 +104,22 @@ def analyze(
             ),
         )
 
+    # Also mine system.access.inbound_network for public IPs a *dry-run* CBI policy WOULD have denied
+    # (access_type=DRY_RUN_DENIAL): inbound clients the current log-only allow-list doesn't cover yet,
+    # so they're prime allow-list candidates. Best-effort (the table exists only where network
+    # monitoring is on) and folded in as *new* IPs only — IPs already seen in the audit candidates keep
+    # their richer audit row. The enforced-denial (DROP) rows feed the recently-denied view instead.
+    if cfg.include_inbound_network:
+        with _phase("Checking system.access.inbound_network for dry-run-denied candidate IPs…"):
+            inbound_candidates = _read_inbound_network_candidates(sql_conn, cfg.lookback_days, cfg.min_events)
+        if inbound_candidates is not None and not inbound_candidates.empty:
+            candidates, added = _merge_candidates(candidates, inbound_candidates, cfg.include_ipv6)
+            if added:
+                on_step(
+                    f"Added {added:,} candidate IP(s) from system.access.inbound_network dry-run "
+                    "denials (would-be-denied inbound clients not yet in the allow-list)."
+                )
+
     # When there are no candidates, run a cheap diagnostic funnel so we can explain *why* rather than
     # just reporting an empty table (the most common confusion: public IPs live on account-level rows,
     # or PrivateLink/NAT masks the real source IP).
@@ -132,13 +148,14 @@ def analyze(
                 "(system.access.inbound_network) in the denied-requests view."
             )
 
-    with _phase("Loading enrichment feeds (threat-intel / cloud / Databricks ranges)…"):
+    with _phase("Loading enrichment feeds (threat-intel / cloud / Databricks / partner ranges)…"):
         threat_df = loaders.threat_intel(cfg.threat_feeds, refresh=cfg.refresh_feeds)
         cloud_df = loaders.cloud_ranges(refresh=cfg.refresh_feeds)
         dbx_df = loaders.databricks_ranges(refresh=cfg.refresh_feeds)
+        partner_df = loaders.partner_ranges(refresh=cfg.refresh_feeds)
     on_step(
         f"Loaded enrichment ranges: {len(threat_df):,} threat-intel, {len(cloud_df):,} cloud, "
-        f"{len(dbx_df):,} Databricks."
+        f"{len(dbx_df):,} Databricks, {len(partner_df):,} partner-platform."
     )
     # A feed that comes back empty (download failed) would make its membership checks silently false;
     # flag it so the operator knows the enrichment is degraded rather than trusting a clean result.
@@ -151,6 +168,7 @@ def analyze(
     threat_ranges = enrich.load_ranges(threat_df, ["source_feed", "threat_type", "confidence", "source_url"])
     cloud_ranges = enrich.load_ranges(cloud_df, ["provider", "service", "region"])
     databricks_ranges = enrich.load_ranges(dbx_df, ["platform", "region", "direction"])
+    partner_ranges = enrich.load_ranges(partner_df, ["partner", "region", "source_url"])
 
     # RDAP is the slow, network-bound step — run concurrently (see _rdap_lookups) with live per-IP
     # progress, so a large candidate set doesn't sit silent for minutes.
@@ -165,7 +183,13 @@ def analyze(
                 _u(f"Enriching candidate IPs — {done}/{total} (RDAP lookup: {ip})")
 
         enriched, threat_match_rows = _enrich_candidates(
-            candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges, on_progress=_progress
+            candidates,
+            cfg,
+            threat_ranges,
+            cloud_ranges,
+            databricks_ranges,
+            partner_ranges,
+            on_progress=_progress,
         )
 
     suggestion_rows = _build_suggestions(enriched, cfg)
@@ -205,6 +229,47 @@ def _read_inbound_network_denied(sql_conn, lookback_days: int):
         return sql.query(sql_conn, queries.inbound_network_denied(lookback_days))
     except Exception:  # noqa: BLE001 - table absent / not enabled / no access → just skip it
         return None
+
+
+def _read_inbound_network_candidates(sql_conn, lookback_days: int, min_events: int):
+    """Dry-run-denied inbound public IPs from system.access.inbound_network as allow-list candidates,
+    or None if that table isn't available. Best-effort, mirroring _read_inbound_network_denied: any
+    query error (most commonly TABLE_OR_VIEW_NOT_FOUND) degrades to None so the audit candidates
+    still stand on their own."""
+    from .. import queries, sql
+
+    try:
+        return sql.query(sql_conn, queries.candidate_ips_from_inbound_network(lookback_days, min_events))
+    except Exception:  # noqa: BLE001 - table absent / not enabled / no access → just skip it
+        return None
+
+
+def _merge_candidates(candidates: pd.DataFrame, inbound: pd.DataFrame, include_ipv6: bool):
+    """Fold the inbound_network dry-run-denial rows into the audit `candidates` frame as *new* public
+    IPs only (an IP already in the audit candidates keeps its richer row — we don't double-count its
+    events). Non-public / reserved IPs are dropped here (CBI governs public ingress, but filter
+    defensively), and IPv6 is kept only when include_ipv6 is set. Returns (merged_frame, n_added).
+    pandas aligns the differing columns on concat, NaN-filling the audit-only columns the inbound rows
+    lack (service_list, principal_emails, …) — enrich.as_list normalises those downstream."""
+
+    def _is_wanted(ip_str) -> bool:
+        try:
+            ip = ipaddress.ip_address(str(ip_str))
+        except ValueError:
+            return False
+        if ip.version == 6 and not include_ipv6:
+            return False
+        return ip.is_global  # excludes private / loopback / link-local / CGNAT / reserved
+
+    inbound = inbound[inbound["public_ip"].map(_is_wanted)]
+    if inbound.empty:
+        return candidates, 0
+    existing = set(candidates["public_ip"]) if not candidates.empty else set()
+    new_rows = inbound[~inbound["public_ip"].isin(existing)]
+    if new_rows.empty:
+        return candidates, 0
+    merged = pd.concat([candidates, new_rows], ignore_index=True)
+    return merged, len(new_rows)
 
 
 def _merge_denied(audit_denied: pd.DataFrame, inbound_denied: pd.DataFrame) -> pd.DataFrame:
@@ -326,12 +391,19 @@ _CLOUD_OWNER_LABELS = {
 }
 
 
-def _known_owner(ip_obj, cloud_ranges, databricks_ranges):
+def _known_owner(ip_obj, cloud_ranges, databricks_ranges, partner_ranges):
     """The owner label + matched CIDR for an IP we can identify from the offline feeds (no RDAP),
-    else (None, None). Databricks takes priority over the cloud provider."""
+    else (None, None). Databricks takes priority, then a named partner platform (a Power BI / dbt IP
+    *is* a cloud IP, so label it as the partner rather than the generic cloud), then the cloud
+    provider."""
     dbx_hits, dbx_cidrs = enrich.match_ranges(ip_obj, databricks_ranges)
     if dbx_hits:
         return "Databricks", (dbx_cidrs[0] if dbx_cidrs else None)
+    partner_hits, partner_cidrs = enrich.match_ranges(ip_obj, partner_ranges)
+    if partner_hits:
+        return (partner_hits[0].get("partner") or "Partner platform"), (
+            partner_cidrs[0] if partner_cidrs else None
+        )
     cloud_hits, cloud_cidrs = enrich.match_ranges(ip_obj, cloud_ranges)
     if cloud_hits:
         provider = (cloud_hits[0].get("provider") or "").lower()
@@ -341,7 +413,9 @@ def _known_owner(ip_obj, cloud_ranges, databricks_ranges):
     return None, None
 
 
-def _enrich_candidates(candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges, on_progress=None):
+def _enrich_candidates(
+    candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges, partner_ranges, on_progress=None
+):
     enriched, threat_match_rows = [], []
     records = candidates.to_dict(orient="records")
 
@@ -355,7 +429,7 @@ def _enrich_candidates(candidates, cfg, threat_ranges, cloud_ranges, databricks_
             ip_obj = ipaddress.ip_address(record["public_ip"])
         except ValueError:
             continue
-        label, cidr = _known_owner(ip_obj, cloud_ranges, databricks_ranges)
+        label, cidr = _known_owner(ip_obj, cloud_ranges, databricks_ranges, partner_ranges)
         if label is not None:
             rdap_cache[record["public_ip"]] = {
                 "rdap_owner_name": label,
@@ -387,6 +461,7 @@ def _enrich_candidates(candidates, cfg, threat_ranges, cloud_ranges, databricks_
         threat_hits, threat_cidrs = enrich.match_ranges(ip_obj, threat_ranges)
         cloud_hits, _ = enrich.match_ranges(ip_obj, cloud_ranges)
         databricks_hits, _ = enrich.match_ranges(ip_obj, databricks_ranges)
+        partner_hits, _ = enrich.match_ranges(ip_obj, partner_ranges)
         for meta, matched_cidr in zip(threat_hits, threat_cidrs, strict=False):
             threat_match_rows.append(
                 {
@@ -415,6 +490,7 @@ def _enrich_candidates(candidates, cfg, threat_ranges, cloud_ranges, databricks_
                 "threat_feeds": sorted({h["source_feed"] for h in threat_hits}),
                 "cloud_provider": sorted({h["provider"] for h in cloud_hits}),
                 "databricks_owned": sorted({h["platform"] for h in databricks_hits}),
+                "partners": sorted({h["partner"] for h in partner_hits}),
             }
         )
         enriched.append(record)
@@ -457,6 +533,7 @@ def _build_suggestions(enriched, cfg) -> list[dict]:
         threat_feeds = sorted({f for r in recs for f in r["threat_feeds"]})
         cloud_providers = sorted({p for r in recs for p in r["cloud_provider"]})
         databricks_owned = sorted({p for r in recs for p in r.get("databricks_owned", [])})
+        partners = sorted({p for r in recs for p in r.get("partners", [])})
         principals = sorted({p for r in recs for p in r["principal_list"]})
         principal_emails = sorted({e for r in recs for e in (r.get("principal_emails") or []) if e})
         subject_names = sorted({sn for r in recs for sn in (r.get("subject_names") or []) if sn})
@@ -477,6 +554,7 @@ def _build_suggestions(enriched, cfg) -> list[dict]:
                 "threat_feeds": threat_feeds or None,
                 "cloud_provider": cloud_providers or None,
                 "databricks_owned": databricks_owned or None,
+                "partners": partners or None,
                 "recommendation": (
                     "ALLOW — Databricks-owned"
                     if databricks_owned
@@ -484,9 +562,13 @@ def _build_suggestions(enriched, cfg) -> list[dict]:
                         "REVIEW — known-bad range"
                         if threat_feeds
                         else (
-                            "REVIEW — Cloud-owned range"
-                            if cloud_providers
-                            else "REVIEW — Other hosting provider"
+                            f"ALLOW — {', '.join(partners)} platform"
+                            if partners
+                            else (
+                                "REVIEW — Cloud-owned range"
+                                if cloud_providers
+                                else "REVIEW — Other hosting provider"
+                            )
                         )
                     )
                 ),

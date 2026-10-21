@@ -235,7 +235,7 @@
     <div class="grid">
       <div>
         <h3>📥 Ingress (CBI)</h3>
-        <p class="learn">Context-Based Ingress — who may connect <em>in</em>, by source IP. Built from <code class="inline">system.access.audit</code>.</p>
+        <p class="learn">Context-Based Ingress — who may connect <em>in</em>, by source IP. Built from <code class="inline">system.access.audit</code> (and dry-run denials in <code class="inline">system.access.inbound_network</code>), enriched with threat-intel, cloud, Databricks and partner-platform ranges. Migrates IP access lists and front-end PrivateLink, and carries existing CBI blocks forward.</p>
       </div>
       <div>
         <h3>📤 Egress (SEG)</h3>
@@ -274,8 +274,8 @@ uv run dbx-nwp-helper --help</pre>
 
   <h2 id="walkthrough">An ingress run, step by step</h2>
   <p>This is what happens on a typical <code class="inline">ingress</code> run. The tool pauses between sections so you review each one; answering <em>no</em> aborts cleanly, writing nothing. (<code class="inline">--yes</code> skips the pauses for scripting.)</p>
-  <figure class="flow reveal" role="img" aria-label="Ingress run flow: confirm the target workspace, analyse audit traffic and enrich it, frame CIDRs and build rules, preview the policy, then a gated create — only with --create-policy and passing pre-checks does it write the policy (dry-run first) and assign it; otherwise it proposes only or aborts, writing nothing.">
-    <svg viewBox="0 0 600 660" xmlns="http://www.w3.org/2000/svg">
+  <figure class="flow reveal" role="img" aria-label="Ingress run flow: confirm the target workspace, analyse audit traffic and enrich it, detect front-end PrivateLink and the existing CBI policy, build rules per dimension (public from traffic, private from a PrivateLink PAS, carrying any other existing blocks forward), preview the policy, then a gated create — only with --create-policy and passing pre-checks does it write the policy (dry-run first) and assign it; otherwise it proposes only or aborts, writing nothing.">
+    <svg viewBox="0 0 600 732" xmlns="http://www.w3.org/2000/svg">
       <defs><marker id="ah-ig" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" class="arrow"/></marker></defs>
       <path class="edge" marker-end="url(#ah-ig)" d="M175,58 L175,80"/>
       <path class="edge" marker-end="url(#ah-ig)" d="M175,130 L175,152"/>
@@ -285,23 +285,25 @@ uv run dbx-nwp-helper --help</pre>
       <path class="edge" marker-end="url(#ah-ig)" d="M175,418 L175,440"/>
       <path class="edge" marker-end="url(#ah-ig)" d="M175,490 L175,512"/>
       <path class="edge" marker-end="url(#ah-ig)" d="M175,562 L175,584"/>
-      <path class="edge" marker-end="url(#ah-ig)" d="M290,323 L336,323"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M175,634 L175,656"/>
       <path class="edge" marker-end="url(#ah-ig)" d="M290,395 L336,395"/>
-      <text class="elabel" x="182" y="363">yes</text>
-      <text class="elabel" x="182" y="435">pass</text>
-      <text class="elabel" x="300" y="316">no</text>
+      <path class="edge" marker-end="url(#ah-ig)" d="M290,467 L336,467"/>
+      <text class="elabel" x="182" y="435">yes</text>
+      <text class="elabel" x="182" y="507">pass</text>
       <text class="elabel" x="300" y="388">no</text>
+      <text class="elabel" x="300" y="460">no</text>
       <g class="node n-decision"><rect x="60" y="12" width="230" height="46" rx="12"/><text x="175" y="35" text-anchor="middle" dominant-baseline="central">Confirm target workspace</text></g>
       <g class="node n-process"><rect x="60" y="84" width="230" height="46" rx="10"/><text x="175" y="107" text-anchor="middle" dominant-baseline="central">Analyse audit + enrich</text></g>
-      <g class="node n-process"><rect x="60" y="156" width="230" height="46" rx="10"/><text x="175" y="179" text-anchor="middle" dominant-baseline="central">Frame CIDRs, build rules</text></g>
-      <g class="node n-process"><rect x="60" y="228" width="230" height="46" rx="10"/><text x="175" y="251" text-anchor="middle" dominant-baseline="central">Preview proposed policy</text></g>
-      <g class="node n-decision"><rect x="60" y="300" width="230" height="46" rx="12"/><text x="175" y="323" text-anchor="middle" dominant-baseline="central">--create-policy ?</text></g>
-      <g class="node n-decision"><rect x="60" y="372" width="230" height="46" rx="12"/><text x="175" y="395" text-anchor="middle" dominant-baseline="central">Pre-checks pass ?</text></g>
-      <g class="node n-write"><rect x="60" y="444" width="230" height="46" rx="10"/><text x="175" y="467" text-anchor="middle" dominant-baseline="central">Write policy — dry-run first</text></g>
-      <g class="node n-process"><rect x="60" y="516" width="230" height="46" rx="10"/><text x="175" y="539" text-anchor="middle" dominant-baseline="central">Assign to workspace</text></g>
-      <g class="node n-done"><rect x="60" y="588" width="230" height="46" rx="10"/><text x="175" y="611" text-anchor="middle" dominant-baseline="central">Done</text></g>
-      <g class="node n-done"><rect x="340" y="300" width="240" height="46" rx="10"/><text x="460" y="317" text-anchor="middle"><tspan x="460">Propose-only —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
-      <g class="node n-abort"><rect x="340" y="372" width="240" height="46" rx="10"/><text x="460" y="389" text-anchor="middle"><tspan x="460">Abort —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
+      <g class="node n-process"><rect x="60" y="156" width="230" height="46" rx="10"/><text x="175" y="173" text-anchor="middle"><tspan x="175">Detect PrivateLink</tspan><tspan x="175" dy="16">&amp; existing CBI</tspan></text></g>
+      <g class="node n-process"><rect x="60" y="228" width="230" height="46" rx="10"/><text x="175" y="245" text-anchor="middle"><tspan x="175">Build rules — public + private,</tspan><tspan x="175" dy="16">carry others forward</tspan></text></g>
+      <g class="node n-process"><rect x="60" y="300" width="230" height="46" rx="10"/><text x="175" y="323" text-anchor="middle" dominant-baseline="central">Preview proposed policy</text></g>
+      <g class="node n-decision"><rect x="60" y="372" width="230" height="46" rx="12"/><text x="175" y="395" text-anchor="middle" dominant-baseline="central">--create-policy ?</text></g>
+      <g class="node n-decision"><rect x="60" y="444" width="230" height="46" rx="12"/><text x="175" y="467" text-anchor="middle" dominant-baseline="central">Pre-checks pass ?</text></g>
+      <g class="node n-write"><rect x="60" y="516" width="230" height="46" rx="10"/><text x="175" y="539" text-anchor="middle" dominant-baseline="central">Write policy — dry-run first</text></g>
+      <g class="node n-process"><rect x="60" y="588" width="230" height="46" rx="10"/><text x="175" y="611" text-anchor="middle" dominant-baseline="central">Assign to workspace</text></g>
+      <g class="node n-done"><rect x="60" y="660" width="230" height="46" rx="10"/><text x="175" y="683" text-anchor="middle" dominant-baseline="central">Done</text></g>
+      <g class="node n-done"><rect x="340" y="372" width="240" height="46" rx="10"/><text x="460" y="389" text-anchor="middle"><tspan x="460">Propose-only —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
+      <g class="node n-abort"><rect x="340" y="444" width="240" height="46" rx="10"/><text x="460" y="461" text-anchor="middle"><tspan x="460">Abort —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
     </svg>
     <figcaption>The ingress run at a glance — nothing is written until you pass <code class="inline">--create-policy</code> <em>and</em> clear the pre-checks. Each step is detailed below.</figcaption>
   </figure>
@@ -320,9 +322,11 @@ uv run dbx-nwp-helper --help</pre>
     </li>
     <li id="ig-analyse">
       <h3>Analyse audit traffic &amp; enrich</h3>
-      <p>It finds the public source IPs that successfully connected (from <code class="inline">system.access.audit</code>), then enriches them with open threat-intel feeds, cloud-provider and Databricks-owned IP ranges, and (optionally) RDAP ownership lookups. This is the slow part — it shows live progress.</p>
+      <p>It finds the public source IPs that successfully connected (from <code class="inline">system.access.audit</code>), then enriches them with open threat-intel feeds, cloud-provider, Databricks-owned and <strong>partner-platform</strong> IP ranges, and (optionally) RDAP ownership lookups. It also folds in the public IPs a <em>dry-run</em> CBI policy would have denied (from <code class="inline">system.access.inbound_network</code>) as extra allow-list candidates. This is the slow part — it shows live progress.</p>
       <details><summary>Learn more — what is RDAP?</summary><div class="body">RDAP (Registration Data Access Protocol) is the successor to WHOIS: a public query to the regional internet registries (ARIN, RIPE, APNIC, …) that returns who an IP range is registered to. The tool uses it to label each observed source IP with an owner, so the proposed rules are reviewable ("Acme Corp" rather than a bare CIDR). <strong>Treat RDAP as a signal, not a source of truth</strong> — registration data can be stale, generic (a hosting provider rather than the real user), or delegated, so use it to inform your review, not to make the decision for you. It's disabled with <code class="inline">--no-enable-rdap</code> (but the <code class="inline">maximum</code> framing needs it).</div></details>
       <details><summary>Learn more — threat-intel enrichment</summary><div class="body">Observed IPs that fall in known-bad ranges are excluded from the allow-list and surfaced for investigation. Databricks-owned control-plane / serverless ranges you actually saw are always kept. All feeds are free, need no API key, and are cached locally.</div></details>
+      <details><summary>Learn more — partner platforms</summary><div class="body">Observed IPs that fall in a known SaaS <strong>partner-platform</strong> range — <strong>Power BI</strong> (from the Azure Service Tags feed) and <strong>dbt platform</strong> (curated); Tableau Cloud is wired up pending a confirmed source — are labelled as that partner and recommended for allow-listing. Databricks also offers a managed "Partner platforms" ingress source (Beta; AWS + GCP) that maintains these IP lists for you; the tool flags it, but since the SDK can't set that source yet, matched IPs are emitted as labelled CIDR allow rules.</div></details>
+      <details><summary>Learn more — dry-run denials as candidates</summary><div class="body">If you've already stood up a <em>dry-run</em> CBI ingress policy, <code class="inline">system.access.inbound_network</code> records the public IPs it <em>would</em> have denied (<code class="inline">access_type=DRY_RUN_DENIAL</code>). The tool folds those into the candidate set — they're exactly the inbound clients your log-only allow-list doesn't cover yet — so you can observe, then complete the allow-list from what it would have blocked. On by default; <code class="inline">--no-include-inbound-network</code> opts out. (Enforced <code class="inline">DROP</code> denials feed the recently-denied view below instead.)</div></details>
       <details><summary>No candidate IPs?</summary><div class="body">Usually the workspace uses <strong>PrivateLink/NAT</strong> (the audit log records the relay's private IP, not the user's public IP), or the public IPs only appear on account-level rows — pass <code class="inline">--include-account-level</code>. The CLI prints a diagnostic funnel explaining where rows dropped out. See <a href="https://docs.databricks.com/admin/system-tables/audit-logs.html">audit system table docs</a>.</div></details>
     </li>
     <li id="ig-denied">
@@ -333,6 +337,12 @@ uv run dbx-nwp-helper --help</pre>
       <h3>Existing IP access lists — migrate them?</h3>
       <p>If the workspace has enabled IP access lists, the tool detects them and shows their actual IP entries. Interactive runs get a pre-checked checkbox to pick exactly which entries to fold into the new CBI policy, <em>alongside</em> the rules learned from observed traffic — everything starts checked, so a single Enter keeps them all. Scripted runs migrate them all by default.</p>
       <details><summary>Learn more — IP ACL → CBI</summary><div class="body">The CBI policy is designed to replace the workspace's IP access lists. After the policy is created and assigned you can optionally turn the old lists off with <code class="inline">--disable-existing-ip-acls</code> (they're preserved and reversible; the flag is refused unless the run both creates and assigns the replacement, so it can't leave the workspace unprotected). See <a href="https://docs.databricks.com/security/network/front-end/ip-access-list.html">IP access lists docs</a>.</div></details>
+    </li>
+    <li id="ig-private">
+      <h3>Front-end PrivateLink &amp; the existing policy</h3>
+      <p>Public, private and cross-workspace access are <strong>independent dimensions</strong> — each is either built/migrated or <strong>carried forward</strong> from the workspace's existing CBI policy (needs account-admin auth to read). Public is built from your observed traffic (above); the other dimensions are handled here.</p>
+      <details><summary>Learn more — front-end PrivateLink (private access)</summary><div class="body">On <strong>AWS/GCP</strong>, the tool reads the workspace's Private Access Settings (PAS) and recreates front-end PrivateLink in the policy's <code class="inline">private_access</code> block — a <em>non-allow-all</em> PAS (specific registered endpoints) is migrated across as-is; an account-level allow-all PAS needs nothing (CBI defaults to allow-all) and never loosens a stricter existing block. On <strong>Azure</strong>, front-end PrivateLink isn't migrated at all (the <code class="inline">databricks_ui_api</code> endpoints are default-allowed and the public-access flag isn't retired) — Azure just migrates IP access lists into public access.</div></details>
+      <details><summary>Learn more — carrying existing blocks forward</summary><div class="body">Any dimension this run doesn't itself produce is copied verbatim from the workspace's currently-assigned CBI policy (restrictive blocks only): an existing restrictive <code class="inline">public_access</code> is preserved when there's no traffic/ACLs to build one, an existing <code class="inline">private_access</code> is carried unless a PAS migration supersedes it, and <strong>cross-workspace access is always carried forward</strong> (this tool doesn't build cross-workspace rules yet; a policy with none is left in compatibility mode).</div></details>
     </li>
     <li id="ig-select">
       <h3>Select which rules to include</h3>
@@ -354,7 +364,7 @@ uv run dbx-nwp-helper --help</pre>
     </li>
     <li id="ig-assign">
       <h3>Assign to the workspace</h3>
-      <p>With <code class="inline">--auto-assign</code> the policy is bound to the workspace. Before creating and assigning, the tool inspects the currently-assigned policy and aborts (or warns) rather than silently clobbering PrivateLink, cross-workspace, or enforced restrictive policies.</p>
+      <p>With <code class="inline">--auto-assign</code> the policy is bound to the workspace. Before creating and assigning, the tool runs a <strong>per-dimension conflict gate</strong>: it aborts only when a dimension this run <em>migrates</em> collides with a <em>restrictive</em> block already on the assigned policy — migrating public (observed traffic / IP ACLs) over a restrictive public block, or migrating a non-allow-all PAS over a restrictive private block. It also guards the opposite direction (a new policy id would drop an existing restrictive egress). Other existing blocks are carried forward, not clobbered.</p>
     </li>
   </ol>
 
@@ -445,6 +455,8 @@ uv run dbx-nwp-helper --help</pre>
       <li>🎯 <strong>Confirm the workspace.</strong> The exact target is shown and gated before any analysis or write.</li>
       <li>🧪 <strong>Dry-run first.</strong> Default mode is log-only — it blocks nothing.</li>
       <li>🧬 <strong>Databricks-owned traffic is prioritised, never blanket-allowed.</strong> Only ranges actually seen in your traffic are kept.</li>
+      <li>🧩 <strong>Public, private &amp; cross-workspace are independent.</strong> Each is migrated or carried forward from the existing policy; the per-dimension pre-check aborts only when a <em>migrated</em> dimension would overwrite a <em>restrictive</em> existing block.</li>
+      <li>🔁 <strong>Existing CBI blocks are reused, not clobbered.</strong> Front-end PrivateLink (AWS/GCP) is migrated into private access; cross-workspace is always carried forward.</li>
       <li>#️⃣ <strong>IPv4 only.</strong> The CBI schema is IPv4-only; IPv6 is analysed but never placed in a policy.</li>
       <li>🧱 <strong>add_to_existing never clobbers the other direction.</strong> It replaces only its own block.</li>
     </ul>

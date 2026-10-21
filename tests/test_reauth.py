@@ -24,8 +24,8 @@ def test_is_expired_auth_ignores_unrelated_errors():
 def test_reauth_profile_prefers_profile_named_in_error():
     # the account client often resolves to a *different* auto-discovered profile than the one asked
     # for; re-auth must target the profile the SDK error actually names.
-    msg = "Run: databricks auth login --profile sfe-account."
-    assert cli._reauth_profile(msg, fallback="sfe-workspace") == "sfe-account"
+    msg = "Run: databricks auth login --profile acme-account."
+    assert cli._reauth_profile(msg, fallback="acme-workspace") == "acme-account"
 
 
 def test_reauth_profile_falls_back_when_unnamed():

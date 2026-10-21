@@ -1,8 +1,9 @@
 # CBI network-policy SDK schema
 
-Verified against `databricks-sdk` **0.113.0** by introspection (not from docs/memory). The project
-pins `databricks-sdk>=0.113.0` in `pyproject.toml` because these dataclasses don't exist in earlier
-versions.
+Verified against `databricks-sdk` **0.152.0** by introspection (not from docs/memory). The project
+pins `databricks-sdk>=0.152.0` in `pyproject.toml` because the `private_access` /
+`cross_workspace_access` sub-blocks (and their dataclasses) don't exist in earlier versions — the
+0.113.0 floor only carried the public-access allow/deny rules.
 
 ## Client & methods
 
@@ -26,9 +27,33 @@ AccountNetworkPolicy
 └── egress:          NetworkPolicyEgress                  # SEG; preserved verbatim on update
 
 CustomerFacingIngressNetworkPolicy
-├── public_access:          CustomerFacingIngressNetworkPolicyPublicAccess
-├── private_access:         ...
-└── cross_workspace_access: ...
+├── public_access:          CustomerFacingIngressNetworkPolicyPublicAccess          # source-IP allow-list
+├── private_access:         CustomerFacingIngressNetworkPolicyPrivateAccess         # front-end PrivateLink
+└── cross_workspace_access: CustomerFacingIngressNetworkPolicyCrossWorkspaceAccess  # workspace→workspace
+
+CustomerFacingIngressNetworkPolicyPrivateAccess          # front-end PrivateLink (the workspace PAS)
+├── restriction_mode: {ALLOW_ALL_REGISTERED_ENDPOINTS | RESTRICTED_ACCESS}
+├── allow_rules: [CustomerFacingIngressNetworkPolicyPrivateIngressRule]
+└── deny_rules:  [...]
+    PrivateRequestOrigin ├── all_registered_endpoints: bool   # any endpoint registered to the account
+                         ├── endpoints: Endpoints(endpoint_ids: [str])   # specific registered endpoints
+                         ├── all_private_access / azure_workspace_private_link: bool   # deny-rule only
+    # AWS/GCP migration (core/policy.build_private_access_block): a non-allow-all PAS (level ENDPOINT)
+    # -> RESTRICTED_ACCESS with endpoints=allowed_vpc_endpoint_ids (mapped across as-is; the PAS name
+    # is kept as the rule label). An allow-all (ACCOUNT) PAS needs no migration (CBI defaults to
+    # allowing all registered endpoints) and never loosens a stricter existing private block. Azure
+    # does NOT migrate front-end PrivateLink. Public, private and cross-workspace are independent
+    # dimensions: each is built/migrated or carried forward from the assigned policy's restrictive
+    # blocks (acl.existing_cbi_ingress), composed via policy.assemble_ingress. Cross-workspace is
+    # never built — always carried forward.
+
+CustomerFacingIngressNetworkPolicyCrossWorkspaceAccess   # serverless workspace→workspace ingress
+├── restriction_mode: {FULL_ACCESS | LEGACY_MODE | RESTRICTED_ACCESS}   # LEGACY_MODE = "compatibility"
+├── allow_rules / deny_rules: [...CrossWorkspaceIngressRule]
+    CrossWorkspaceRequestOrigin ├── all_source_workspaces: bool
+                                └── selected_workspaces: WorkspaceIdList(workspace_ids: [int])
+    # This tool leaves it unset (account default = compatibility) and preserves any existing block on
+    # update — it doesn't build cross-workspace rules yet.
 
 CustomerFacingIngressNetworkPolicyPublicAccess
 ├── restriction_mode: {FULL_ACCESS | RESTRICTED_ACCESS}   # helper always uses RESTRICTED_ACCESS
@@ -80,3 +105,13 @@ AuthenticationIdentity
 - **Dry-run vs enforce are separate blocks**, not an enforcement flag: write `ingress_dry_run` to
   trial (log-only), `ingress` to enforce (blocking). Update replaces the whole policy, so the CLI
   reads the existing policy and re-sends the untouched blocks (`core/policy.py`).
+- **Update is a full replace, so `build_ingress_block` only ever sets `public_access` (+ a mirrored
+  `private_access` when migrating a PAS).** `apply_ingress` carries over the existing policy's
+  `private_access` / `cross_workspace_access` sub-blocks (from either mode's block, so a mode switch
+  doesn't drop them) unless the freshly built block set them — so an in-place update never clobbers a
+  console-configured private-access or cross-workspace (compatibility) config.
+- **No "Partner platforms" network source exists in the SDK.** `PublicRequestOrigin` is only
+  `included_ip_ranges` / `excluded_ip_ranges` / `all_ip_ranges`. The console's managed "Partner
+  platforms" source (Beta; AWS + GCP) is console/Terraform-only, so partner-platform IPs this tool
+  recognises (Power BI / dbt) are emitted as ordinary labelled CIDR allow-rules, and the CLI advises
+  the managed source as the cleaner alternative.

@@ -626,15 +626,15 @@ def test_confirm_workspace_bad_profile_exits_cleanly(monkeypatch, capsys):
         auth,
         "workspace_client",
         lambda conn: (_ for _ in ()).throw(
-            ValueError("resolve: /Users/x/.databrickscfg has no sfe-cloud profile configured")
+            ValueError("resolve: /Users/x/.databrickscfg has no acme-ws profile configured")
         ),
     )
-    monkeypatch.setattr(cli, "_available_profiles", lambda: ["sfe-foghorn", "e2-dogfood"])
+    monkeypatch.setattr(cli, "_available_profiles", lambda: ["acme-dev", "acme-prod"])
     with pytest.raises(typer.Exit) as exc:
-        cli._confirm_workspace(Connection(profile="sfe-cloud"), yes=True)
+        cli._confirm_workspace(Connection(profile="acme-ws"), yes=True)
     assert exc.value.exit_code == 1
     out = capsys.readouterr().out
-    assert "sfe-cloud" in out and "sfe-foghorn" in out  # names the bad profile + lists available
+    assert "acme-ws" in out and "acme-dev" in out  # names the bad profile + lists available
 
 
 def test_account_client_bad_profile_exits_cleanly(monkeypatch, capsys):
@@ -812,57 +812,133 @@ def _fake_pol(ingress=None, dry=None, egress=None):
     return type("P", (), {"ingress": ingress, "ingress_dry_run": dry, "egress": egress})()
 
 
-def test_ingress_preflight_aborts_on_pas(monkeypatch):
+# existing = (existing_public, existing_private, migrating_restrictive_private, assigned_id)
+def _existing(public=None, private=None, migrating_private=False, assigned_id="p1"):
+    return (public, private, migrating_private, assigned_id)
+
+
+def test_ingress_preflight_aborts_when_migrating_public_over_restrictive_public():
     import typer
 
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: True)
+    existing = _existing(public=object())  # assigned policy has a restrictive public block
     with pytest.raises(typer.Exit) as e:
-        cli._ingress_preflight(object(), 42, "new-id", yes=True)
+        cli._ingress_preflight(object(), 42, "p1", yes=True, existing=existing, migrating_public=True)
     assert e.value.exit_code == 1
 
 
-def test_ingress_preflight_aborts_on_private_config(monkeypatch):
+def test_ingress_preflight_no_public_abort_when_not_migrating_public():
+    # existing restrictive public present but we're NOT migrating public (nothing to build) → it's
+    # preserved, not clobbered, so no abort.
+    existing = _existing(public=object())
+    cli._ingress_preflight(object(), 42, "p1", yes=True, existing=existing, migrating_public=False)
+
+
+def test_ingress_preflight_aborts_when_migrating_restrictive_private_over_existing_private():
     import typer
 
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
-    monkeypatch.setattr(
-        "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(ingress="X"))
-    )
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: ing == "X")
+    existing = _existing(private=object(), migrating_private=True)
     with pytest.raises(typer.Exit) as e:
-        cli._ingress_preflight(object(), 42, "new-id", yes=True)
+        cli._ingress_preflight(object(), 42, "p1", yes=True, existing=existing, migrating_public=False)
     assert e.value.exit_code == 1
 
 
-def test_ingress_preflight_aborts_on_enforced_public(monkeypatch):
-    import typer
+def test_ingress_preflight_no_private_abort_when_not_migrating_restrictive_private():
+    # existing restrictive private present, but we're not migrating a non-allow-all PAS (it's carried
+    # forward instead) → no abort.
+    existing = _existing(private=object(), migrating_private=False)
+    cli._ingress_preflight(object(), 42, "p1", yes=True, existing=existing, migrating_public=True)
 
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+
+def test_ingress_preflight_proceeds_when_clean():
+    cli._ingress_preflight(
+        object(), 42, "new-id", yes=True, existing=_existing(), migrating_public=True
+    )  # must not raise
+
+
+def _wc(host):
+    return type("WC", (), {"config": type("C", (), {"host": host})()})()
+
+
+def _fake_pas(level, ids=None, name=None, pid="pas-1"):
+    return type(
+        "PAS",
+        (),
+        {
+            "private_access_settings_id": pid,
+            "private_access_settings_name": name,
+            "private_access_level": type("E", (), {"value": level})(),
+            "allowed_vpc_endpoint_ids": ids,
+        },
+    )()
+
+
+def test_reconcile_existing_ingress_migrates_endpoint_pas(monkeypatch):
+    from dbx_nwp_helper.config import IngressConfig
+
     monkeypatch.setattr(
-        "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(ingress="ENF"))
+        "dbx_nwp_helper.core.acl.read_workspace_pas",
+        lambda a, w: (_fake_pas("ENDPOINT", ids=["vpce-a"], name="prod"), "ok"),
     )
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: ing == "ENF")
-    with pytest.raises(typer.Exit) as e:
-        cli._ingress_preflight(object(), 42, "new-id", yes=True)
-    assert e.value.exit_code == 1
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.existing_cbi_ingress", lambda a, w: ("p1", None, None, None))
+    cfg = IngressConfig()
+    ex_pub, ex_priv, migrating_private, _id = cli._reconcile_existing_ingress(
+        object(), 42, _wc("https://dbc-x.cloud.databricks.com"), cfg, yes=True
+    )
+    assert migrating_private is True  # non-allow-all PAS
+    assert cfg.private_access.as_dict()["restriction_mode"] == "RESTRICTED_ACCESS"
 
 
-def test_ingress_preflight_warns_on_dry_run_public_then_proceeds(monkeypatch, capsys):
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+def test_reconcile_existing_ingress_allow_all_pas_does_not_loosen_restrictive_existing(monkeypatch):
+    # allow-all PAS + existing restrictive CBI private → keep the stricter existing private block.
+    from dbx_nwp_helper.config import IngressConfig
+    from dbx_nwp_helper.core import policy
+
+    existing_priv = policy.build_private_access_block("RESTRICTED_ACCESS", ["vpce-existing"])
     monkeypatch.setattr(
-        "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(ingress=None, dry="DRY"))
+        "dbx_nwp_helper.core.acl.read_workspace_pas", lambda a, w: (_fake_pas("ACCOUNT"), "ok")
     )
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: ing == "DRY")
-    cli._ingress_preflight(object(), 42, "new-id", yes=True)  # must not raise
-    assert "DRY-RUN" in capsys.readouterr().out
+    monkeypatch.setattr(
+        "dbx_nwp_helper.core.acl.existing_cbi_ingress", lambda a, w: ("p1", None, existing_priv, None)
+    )
+    cfg = IngressConfig()
+    _pub, _priv, migrating_private, _id = cli._reconcile_existing_ingress(
+        object(), 42, _wc("https://x.gcp.databricks.com"), cfg, yes=True
+    )
+    assert migrating_private is False
+    assert cfg.private_access is existing_priv  # stricter existing kept, not loosened to allow-all
 
 
-def test_ingress_preflight_proceeds_when_clean(monkeypatch):
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: (None, None))
-    cli._ingress_preflight(object(), 42, "new-id", yes=True)  # must not raise
+def test_reconcile_existing_ingress_azure_skips_pas_but_copies_forward(monkeypatch):
+    # Azure: never reads a PAS, but carries existing private + cross-workspace forward.
+    from dbx_nwp_helper.config import IngressConfig
+
+    seen = {"pas_read": False}
+
+    def _read(a, w):
+        seen["pas_read"] = True
+        return None, "none"
+
+    priv_sentinel, xws_sentinel = object(), object()
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.read_workspace_pas", _read)
+    monkeypatch.setattr(
+        "dbx_nwp_helper.core.acl.existing_cbi_ingress",
+        lambda a, w: ("p1", None, priv_sentinel, xws_sentinel),
+    )
+    cfg = IngressConfig()
+    cli._reconcile_existing_ingress(object(), 42, _wc("https://adb-1.2.azuredatabricks.net"), cfg, yes=True)
+    assert seen["pas_read"] is False  # no PAS read on Azure
+    assert cfg.private_access is priv_sentinel
+    assert cfg.existing_xws is xws_sentinel
+
+
+def test_reconcile_existing_ingress_noop_without_account():
+    from dbx_nwp_helper.config import IngressConfig
+
+    cfg = IngressConfig()
+    assert cli._reconcile_existing_ingress(
+        None, 42, _wc("https://x.cloud.databricks.com"), cfg, yes=True
+    ) == (None, None, False, None)
+    assert cfg.private_access is None and cfg.existing_public is None and cfg.existing_xws is None
 
 
 def _egr(restricted=True, enforced=True):
@@ -881,29 +957,32 @@ def _egr(restricted=True, enforced=True):
 
 def test_ingress_preflight_aborts_when_new_id_drops_enforced_egress(monkeypatch):
     # A new ingress policy id rebinds the workspace to a FULL_ACCESS-egress policy, dropping the
-    # assigned policy's ENFORCED egress -> abort.
+    # assigned policy's ENFORCED egress -> abort (the egress guard re-reads the assigned policy).
     import typer
 
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: False)
     monkeypatch.setattr(
         "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(egress=_egr(True, True)))
     )
     with pytest.raises(typer.Exit) as e:
-        cli._ingress_preflight(object(), 42, "different-id", yes=True)
+        cli._ingress_preflight(
+            object(),
+            42,
+            "different-id",
+            yes=True,
+            existing=_existing(assigned_id="p1"),
+            migrating_public=True,
+        )
     assert e.value.exit_code == 1
 
 
 def test_ingress_preflight_same_id_keeps_egress(monkeypatch):
     # Updating the SAME policy id preserves its egress, so an enforced egress must NOT abort.
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: False)
     monkeypatch.setattr(
         "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(egress=_egr(True, True)))
     )
-    cli._ingress_preflight(object(), 42, "p1", yes=True)  # same id -> must not raise
+    cli._ingress_preflight(
+        object(), 42, "p1", yes=True, existing=_existing(assigned_id="p1"), migrating_public=True
+    )  # same id -> must not raise
 
 
 def test_egress_preflight_aborts_on_enforced_egress(monkeypatch):

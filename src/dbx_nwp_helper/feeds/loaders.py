@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from . import cache, cloud, databricks, threat
+from . import cache, cloud, databricks, partners, threat
 
 
 def threat_intel(selected_feeds: list[str], refresh: bool = False) -> pd.DataFrame:
@@ -23,3 +23,7 @@ def cloud_ranges(refresh: bool = False) -> pd.DataFrame:
 
 def databricks_ranges(refresh: bool = False) -> pd.DataFrame:
     return cache.get_or_build("databricks_ranges", databricks.load_databricks_ranges, refresh=refresh)
+
+
+def partner_ranges(refresh: bool = False) -> pd.DataFrame:
+    return cache.get_or_build("partner_ranges", partners.load_partner_ranges, refresh=refresh)

@@ -78,6 +78,10 @@ class IngressConfig:
     treat_null_status_as_success: bool = False
     include_ipv6: bool = False
     include_account_level: bool = False
+    # Also mine system.access.inbound_network for public IPs a dry-run CBI policy would have denied
+    # (access_type=DRY_RUN_DENIAL) and fold them into the allow-list candidate set. Best-effort — the
+    # table exists only where network monitoring is enabled; absent/empty degrades silently.
+    include_inbound_network: bool = True
     # Enrichment
     threat_feeds: list[str] = field(default_factory=lambda: list(THREAT_FEEDS))
     enable_rdap: bool = True
@@ -102,6 +106,18 @@ class IngressConfig:
     # (_reconcile_ip_acls); defaults to True so a --yes / non-interactive run migrates them.
     migrate_ip_acls: bool = True
     deny_denied_ips: bool = False
+    # Ingress sub-blocks to compose into the generated policy alongside the built public allow-list
+    # (set by the CLI's _reconcile_existing_ingress). Public and private are independent dimensions;
+    # cross-workspace is never built, only carried forward. All held as SDK objects so
+    # preview/export/apply emit them verbatim.
+    #   private_access   — a non-allow-all PAS migrated into private_access (AWS/GCP), or an existing
+    #                      CBI private_access carried forward (all clouds), or None.
+    #   existing_public  — an existing restrictive CBI public_access carried forward when this run has
+    #                      no observed traffic / IP ACLs of its own to build a public block from.
+    #   existing_xws     — an existing restrictive cross_workspace_access carried forward verbatim.
+    private_access: object | None = None
+    existing_public: object | None = None
+    existing_xws: object | None = None
     # Interactively pick which proposed allow rules to keep (checkbox), before they're built. On by
     # default in interactive runs; skipped under --yes / non-interactive or with --no-select-rules.
     select_rules: bool = True

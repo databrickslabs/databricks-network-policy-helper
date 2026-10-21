@@ -159,6 +159,50 @@ def test_load_cloud_ranges_warns_when_all_feeds_unavailable(monkeypatch, capsys)
     assert "azure" in capsys.readouterr().out.lower()  # explicit warning that Azure was skipped
 
 
+# ------------------------------------------------------------------ partner-platform range parsing
+def test_load_partner_ranges_powerbi_dynamic_plus_dbt_curated(monkeypatch):
+    from dbx_nwp_helper.feeds import cloud, partners
+
+    azure_conf = "x https://download.microsoft.com/download/a/b/ServiceTags_Public_20260101.json y"
+    azure_json = {
+        "values": [
+            {"name": "PowerBI", "properties": {"region": "", "addressPrefixes": ["13.73.248.0/22"]}},
+            {
+                "name": "PowerBI.WestEurope",
+                "properties": {"region": "westeurope", "addressPrefixes": ["51.144.0.0/16"]},
+            },
+            # a non-Power-BI tag must be ignored by the partner feed
+            {"name": "Storage", "properties": {"region": "eastus", "addressPrefixes": ["20.0.0.0/16"]}},
+        ]
+    }
+
+    def fake_get(url, as_json=False):
+        if "details.aspx" in url:
+            return azure_conf
+        if "ServiceTags_Public" in url:
+            return azure_json
+        return None
+
+    monkeypatch.setattr(cloud, "http_get", fake_get)
+    df = partners.load_partner_ranges()
+    assert list(df.columns) == partners.PARTNER_COLUMNS
+    powerbi = set(df[df["partner"] == "Power BI"]["cidr"])
+    assert powerbi == {"13.73.248.0/22", "51.144.0.0/16"}  # global + regional PowerBI tags only
+    assert "20.0.0.0/16" not in set(df["cidr"])  # Storage tag excluded
+    # dbt is curated in-repo and present regardless of the Azure fetch; bare IPs normalised to /32
+    dbt = set(df[df["partner"] == "dbt platform"]["cidr"])
+    assert "52.45.144.63/32" in dbt and "34.33.2.0/26" in dbt
+
+
+def test_load_partner_ranges_dbt_survives_powerbi_feed_failure(monkeypatch):
+    from dbx_nwp_helper.feeds import cloud, partners
+
+    monkeypatch.setattr(cloud, "http_get", lambda url, as_json=False: None)  # Azure feed down
+    df = partners.load_partner_ranges()
+    assert df[df["partner"] == "Power BI"].empty  # no Power BI ranges this run
+    assert not df[df["partner"] == "dbt platform"].empty  # curated dbt ranges still present
+
+
 # ------------------------------------------------------------------ Databricks range parsing
 def test_load_databricks_ranges_parses_prefixes(monkeypatch):
     from dbx_nwp_helper.feeds import databricks as dbx

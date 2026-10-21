@@ -39,6 +39,10 @@ def _group_label(row) -> str:
     if row["databricks_owned"]:
         cloud = _slug((row["databricks_owned"] or ["databricks"])[0])
         base = f"databricks-{cloud}"
+    elif row.get("partners"):
+        # A partner-platform group (Power BI / dbt / Tableau) — label it by the partner, not the
+        # cloud whose range it also sits in (the owner is already the partner name).
+        base = _slug((row["partners"] or ["partner"])[0])
     elif row["cloud_provider"]:
         # For cloud-owned IPs the owner is already the friendly cloud label (see
         # ingress._known_owner), so prefixing the cloud token would double it up
@@ -206,6 +210,13 @@ def build_rules(
         allow, deny = limits.enforce_limits(list(target_specs[tgt]), list(deny_specs), label, _limit_warn)
         policies[tgt] = {"allow": allow, "deny": deny}
 
+    # When the public analysis produced no targets (no observed traffic, no IP ACLs) but we still
+    # have a block to carry/migrate into some dimension (private_access, an existing public to
+    # preserve, or cross-workspace), seed a single target so those blocks are still built, previewed,
+    # and applied.
+    if not policies and (cfg.private_access or cfg.existing_public or cfg.existing_xws):
+        policies[ALL_WORKSPACES] = {"allow": [], "deny": []}
+
     if cfg.policy_scope == "per_workspace" and len(policies) > MAX_POLICIES_PER_ACCOUNT:
         note(
             f"{len(policies)} per-workspace policies > {MAX_POLICIES_PER_ACCOUNT} account limit — "
@@ -354,6 +365,21 @@ def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note
 
 
 # ------------------------------------------------------------------------------- preview + apply
+def _ingress_block(allow, deny, cfg: IngressConfig, note: Note = lambda _m: None):
+    """Compose the generated policy's ingress from independent dimensions, so preview / export / apply
+    all emit the same shape:
+      * public — built net-new from this target's observed-traffic + IP-ACL specs; when there are
+        none, an existing restrictive CBI public_access is carried forward (cfg.existing_public);
+      * private — a migrated non-allow-all PAS or an existing private_access carried forward
+        (cfg.private_access);
+      * cross-workspace — never built, always carried forward verbatim (cfg.existing_xws)."""
+    if allow or deny:
+        public = policy.build_public_access_block(allow, deny, note)
+    else:
+        public = cfg.existing_public  # nothing to build → preserve any existing restrictive public
+    return policy.assemble_ingress(public, cfg.private_access, cfg.existing_xws)
+
+
 def _single_policy_id(cfg: IngressConfig, profile: str | None, this_workspace_id) -> str:
     """The policy id for a single-policy scope (current_workspace / all_workspaces): the
     add_to_existing target, else the resolved policy name (profile/workspace-id default)."""
@@ -393,7 +419,7 @@ def export_payload(
     from databricks.sdk.service.settings import AccountNetworkPolicy
 
     p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
-    block = policy.build_ingress_block(p["allow"], p["deny"], note)
+    block = _ingress_block(p["allow"], p["deny"], cfg, note)
     pid = _single_policy_id(cfg, profile, this_workspace_id)
     np = AccountNetworkPolicy(
         account_id=account_id, network_policy_id=pid, egress=policy.build_full_access_egress()
@@ -407,9 +433,9 @@ def preview_blocks(policies: dict, cfg: IngressConfig, note: Note = lambda _m: N
     out = {}
     for tgt in sorted(policies, key=str):
         allow, deny = policies[tgt]["allow"], policies[tgt]["deny"]
-        if not (allow or deny):
+        if not (allow or deny or cfg.private_access or cfg.existing_public or cfg.existing_xws):
             continue
-        block = policy.build_ingress_block(allow, deny, note)
+        block = _ingress_block(allow, deny, cfg, note)
         out[tgt] = {cfg.policy_mode_target: block.as_dict()}
     return out
 
@@ -432,7 +458,7 @@ def apply(
         p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
         add_to_existing = cfg.apply.policy_action == "add_to_existing"
         single_id = _single_policy_id(cfg, profile, this_workspace_id)
-        block = policy.build_ingress_block(p["allow"], p["deny"], note)
+        block = _ingress_block(p["allow"], p["deny"], cfg, note)
         action, effective_id, sent = policy.apply_ingress(
             account, account_id, single_id, block, target_attr, must_exist=add_to_existing
         )
@@ -446,7 +472,7 @@ def apply(
         for tgt in ws_targets:
             pid = _ws_policy_id(cfg, profile, tgt)
             p = policies[tgt]
-            block = policy.build_ingress_block(p["allow"], p["deny"], note)
+            block = _ingress_block(p["allow"], p["deny"], cfg, note)
             try:
                 action, effective_id, _ = policy.apply_ingress(account, account_id, pid, block, target_attr)
                 result = {"target": tgt, "action": action, "policy_id": effective_id}

@@ -96,14 +96,47 @@ def build_deny_rule(spec: dict):
     )
 
 
-def build_ingress_block(allow: list[dict], deny: list[dict], note: Note = lambda _m: None):
-    """Assemble a CustomerFacingIngressNetworkPolicy from allow specs (+ optional deny specs).
+def build_private_access_block(
+    restriction_mode: str, endpoint_ids: list[str] | None = None, label: str = "registered-private-endpoints"
+):
+    """A CustomerFacingIngressNetworkPolicyPrivateAccess (front-end PrivateLink) sub-block:
+      * ALLOW_ALL_REGISTERED_ENDPOINTS -> the mode alone (any endpoint registered to the account);
+      * RESTRICTED_ACCESS -> one allow rule whose origin lists the given registered endpoint ids. With
+        no ids the block is RESTRICTED_ACCESS with no allow rules — faithfully, no endpoint permitted.
+    The ids are the PAS `allowed_vpc_endpoint_ids`, mapped across as-is; `label` is the PAS name
+    verbatim (see acl.plan_from_pas)."""
+    from databricks.sdk.service.settings import (  # noqa: I001
+        CustomerFacingIngressNetworkPolicyEndpoints as Endpoints,
+        CustomerFacingIngressNetworkPolicyPrivateAccess as PrivateAccess,
+        CustomerFacingIngressNetworkPolicyPrivateAccessRestrictionMode as PrivateMode,
+        CustomerFacingIngressNetworkPolicyPrivateIngressRule as PrivateRule,
+        CustomerFacingIngressNetworkPolicyPrivateRequestOrigin as PrivateOrigin,
+        CustomerFacingIngressNetworkPolicyRequestDestination as Destination,
+    )
 
-    RESTRICTED_ACCESS is default-DENY; if a policy ends up with deny rules but no allow rules,
+    if restriction_mode == "ALLOW_ALL_REGISTERED_ENDPOINTS":
+        return PrivateAccess(restriction_mode=PrivateMode.ALLOW_ALL_REGISTERED_ENDPOINTS)
+    rules = (
+        [
+            PrivateRule(
+                label=label,
+                origin=PrivateOrigin(endpoints=Endpoints(endpoint_ids=list(endpoint_ids))),
+                destination=Destination(all_destinations=True),
+            )
+        ]
+        if endpoint_ids
+        else None
+    )
+    return PrivateAccess(restriction_mode=PrivateMode.RESTRICTED_ACCESS, allow_rules=rules)
+
+
+def build_public_access_block(allow: list[dict], deny: list[dict], note: Note = lambda _m: None):
+    """The ingress public_access (source-IP) sub-block from allow specs (+ optional deny specs).
+
+    RESTRICTED_ACCESS is default-DENY; if a block ends up with deny rules but no allow rules,
     everything would be blocked — add a catch-all allow (all public IPs) to preserve
     "block these, allow the rest"."""
     from databricks.sdk.service.settings import (  # noqa: I001
-        CustomerFacingIngressNetworkPolicy as IngressPolicy,
         CustomerFacingIngressNetworkPolicyPublicAccess as PublicAccess,
         CustomerFacingIngressNetworkPolicyPublicAccessRestrictionMode as RestrictionMode,
     )
@@ -123,13 +156,39 @@ def build_ingress_block(allow: list[dict], deny: list[dict], note: Note = lambda
             "Policy has deny rules but no allow rules — added a catch-all allow (all public IPs) "
             "so non-denied traffic is still permitted (default-allow-except-blocked)."
         )
-
-    public = PublicAccess(
+    return PublicAccess(
         restriction_mode=RestrictionMode.RESTRICTED_ACCESS,
         allow_rules=[build_ingress_rule(s) for s in allow],
         deny_rules=[build_deny_rule(s) for s in (deny or [])] or None,
     )
-    return IngressPolicy(public_access=public)
+
+
+def assemble_ingress(public_access=None, private_access=None, cross_workspace_access=None):
+    """Assemble a CustomerFacingIngressNetworkPolicy from independently built-or-preserved sub-blocks
+    (public / private / cross-workspace). Any may be None (omitted). Public and private ingress are
+    independent dimensions — each is migrated from observed traffic / a PAS or carried forward from
+    the workspace's existing CBI policy; cross-workspace is never built, only carried forward."""
+    from databricks.sdk.service.settings import CustomerFacingIngressNetworkPolicy as IngressPolicy
+
+    return IngressPolicy(
+        public_access=public_access,
+        private_access=private_access,
+        cross_workspace_access=cross_workspace_access,
+    )
+
+
+def build_ingress_block(
+    allow: list[dict],
+    deny: list[dict],
+    note: Note = lambda _m: None,
+    private_access=None,
+):
+    """Convenience wrapper: a full ingress block with a built public_access and an optional
+    private_access (the engine composes build_public_access_block / preserved blocks via
+    assemble_ingress directly when it also needs to carry cross-workspace forward)."""
+    return assemble_ingress(
+        public_access=build_public_access_block(allow, deny, note), private_access=private_access
+    )
 
 
 def build_full_access_egress():
@@ -209,13 +268,27 @@ def apply_ingress(
         existing = AccountNetworkPolicy(account_id=account_id, network_policy_id=policy_id)
         action = "created"
 
-    setattr(existing, target_attr, block)
     # `ingress` and `ingress_dry_run` are mutually exclusive on the API ("Only one of ingress or
     # ingress_dry_run can be set at a time") — they're the enforce- vs dry-run-mode form of the same
     # ingress config. Setting one must clear the other, or updating a policy that already carries the
     # opposite mode's block would send both and be rejected. Clearing it is how a mode switch
     # (e.g. enforce -> dry_run) actually takes effect.
     opposite_attr = "ingress" if target_attr == "ingress_dry_run" else "ingress_dry_run"
+    # Preserve the private-access and cross-workspace sub-blocks that this tool doesn't rebuild: our
+    # freshly built block only ever sets public_access (and, for a PrivateLink migration,
+    # private_access). Carry over whatever the existing policy already had — from either mode's block,
+    # so a mode switch doesn't drop it — unless our new block explicitly sets that sub-block. This is
+    # why update is a full replace yet never clobbers a console-configured private-access /
+    # cross-workspace (compatibility) config the user didn't ask us to touch.
+    for src_attr in (target_attr, opposite_attr):
+        src = getattr(existing, src_attr, None)
+        if src is None:
+            continue
+        if block.private_access is None and getattr(src, "private_access", None) is not None:
+            block.private_access = src.private_access
+        if block.cross_workspace_access is None and getattr(src, "cross_workspace_access", None) is not None:
+            block.cross_workspace_access = src.cross_workspace_access
+    setattr(existing, target_attr, block)
     setattr(existing, opposite_attr, None)
     # Ensure the opposite direction is defined but never clobbered: only add a permissive egress
     # default when the policy has none (a fresh policy, or one somehow created without egress).

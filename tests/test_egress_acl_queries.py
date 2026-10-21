@@ -674,26 +674,97 @@ def test_disable_ip_access_lists_noop_when_never_configured():
     assert ws.workspace_conf.set_calls == []
 
 
-def _pas_account(pas_id):
+def _pas_full_account(pas_id, *, level="ACCOUNT", endpoint_ids=None, pas_name=None, raise_ws=False):
     class _WS:
         def get(self, workspace_id):
+            if raise_ws:
+                raise RuntimeError("no perms")
             return type("W", (), {"private_access_settings_id": pas_id})()
 
-    return type("Acct", (), {"workspaces": _WS()})()
+    class _PA:
+        def get(self, private_access_settings_id):
+            return type(
+                "PAS",
+                (),
+                {
+                    "private_access_settings_id": pas_id,
+                    "private_access_settings_name": pas_name,
+                    "private_access_level": type("E", (), {"value": level})(),
+                    "allowed_vpc_endpoint_ids": endpoint_ids,
+                },
+            )()
+
+    return type("Acct", (), {"workspaces": _WS(), "private_access": _PA()})()
 
 
-def test_workspace_pas_attached_true_false():
-    assert acl_core.workspace_pas_attached(_pas_account("pas-abc"), 42) is True
-    assert acl_core.workspace_pas_attached(_pas_account(None), 42) is False
+def test_read_workspace_pas_statuses():
+    # 'ok' when a PAS is attached, 'none' when not, 'error' when the account read fails.
+    pas, status = acl_core.read_workspace_pas(_pas_full_account("pas-1"), 42)
+    assert status == "ok" and pas is not None
+    _, status_none = acl_core.read_workspace_pas(_pas_full_account(None), 42)
+    assert status_none == "none"
+    _, status_err = acl_core.read_workspace_pas(_pas_full_account("pas-1", raise_ws=True), 42)
+    assert status_err == "error"
 
 
-def test_workspace_pas_attached_none_on_error():
-    class _WS:
-        def get(self, workspace_id):
-            raise RuntimeError("no perms")
+def test_plan_from_pas_account_level():
+    pas, _ = acl_core.read_workspace_pas(_pas_full_account("pas-1", level="ACCOUNT"), 42)
+    plan = acl_core.plan_from_pas(pas)
+    assert plan.restriction_mode == "ALLOW_ALL_REGISTERED_ENDPOINTS"
+    assert plan.endpoint_ids == []
+    assert plan.source_pas_id == "pas-1"
 
-    acct = type("Acct", (), {"workspaces": _WS()})()
-    assert acl_core.workspace_pas_attached(acct, 42) is None
+
+def test_plan_from_pas_endpoint_level_keeps_ids_and_name_label():
+    pas, _ = acl_core.read_workspace_pas(
+        _pas_full_account("pas-2", level="ENDPOINT", endpoint_ids=["vpce-a", "vpce-b"], pas_name="prod-pas"),
+        42,
+    )
+    plan = acl_core.plan_from_pas(pas)
+    assert plan.restriction_mode == "RESTRICTED_ACCESS"
+    assert plan.endpoint_ids == ["vpce-a", "vpce-b"]
+    assert plan.label == "prod-pas"  # PAS name kept verbatim as the rule label
+
+
+def test_existing_cbi_ingress_copies_restrictive_subblocks_only():
+    # existing_cbi_ingress returns deep-copied, restrictive-only (public / private / xws) sub-blocks
+    # from the workspace's assigned CBI policy; permissive blocks come back as None.
+    import types
+
+    restrictive_pub = types.SimpleNamespace(
+        restriction_mode=types.SimpleNamespace(value="RESTRICTED_ACCESS"),
+        allow_rules=[object()],
+        deny_rules=None,
+    )
+    permissive_priv = types.SimpleNamespace(
+        restriction_mode=types.SimpleNamespace(value="ALLOW_ALL_REGISTERED_ENDPOINTS"),
+        allow_rules=None,
+        deny_rules=None,
+    )
+    restrictive_xws = types.SimpleNamespace(
+        restriction_mode=types.SimpleNamespace(value="RESTRICTED_ACCESS"),
+        allow_rules=[object()],
+        deny_rules=None,
+    )
+    ingress = types.SimpleNamespace(
+        public_access=restrictive_pub, private_access=permissive_priv, cross_workspace_access=restrictive_xws
+    )
+    pol = types.SimpleNamespace(ingress=ingress, ingress_dry_run=None)
+
+    import dbx_nwp_helper.core.acl as acl_mod
+
+    acl_core_patched = acl_mod
+    # assigned_policy returns (id, pol); patch it for this call
+    orig = acl_core_patched.assigned_policy
+    acl_core_patched.assigned_policy = lambda a, w: ("p1", pol)
+    try:
+        pid, pub, priv, xws = acl_core.existing_cbi_ingress(object(), 42)
+    finally:
+        acl_core_patched.assigned_policy = orig
+    assert pid == "p1"
+    assert pub is not None  # restrictive public carried
+    assert priv is None  # permissive private dropped
+    assert xws is not None  # restrictive cross-workspace carried
 
 
 def _policy_account(assigned_policy_id, policy_obj):
@@ -808,8 +879,22 @@ def test_inbound_network_denied_query_shape():
     assert "system.access.inbound_network" in q
     assert "source.ip AS source_ip" in q  # the CBI source IP lives in the source struct
     assert "INTERVAL 21 DAYS" in q
+    assert "access_type = 'DROP'" in q  # only enforced denials feed the recently-denied view
+    assert "DRY_RUN_DENIAL" not in q  # dry-run would-be-denials are candidates, not denials
     # same output columns as denied_requests(), so the two frames union cleanly
     for col in ("denied_events", "principals", "principal_list", "first_denied", "last_denied"):
+        assert col in q
+
+
+def test_candidate_ips_from_inbound_network_query_shape():
+    q = queries.candidate_ips_from_inbound_network(14, min_events=3)
+    assert "system.access.inbound_network" in q
+    assert "access_type = 'DRY_RUN_DENIAL'" in q  # would-be-denied under a dry-run policy
+    assert "INTERVAL 14 DAYS" in q
+    assert "HAVING COUNT(*) >= 3" in q
+    # shaped like frequent_public_ips so the rows merge into the candidate set
+    assert "source.ip AS public_ip" in q
+    for col in ("events", "principals", "principal_list", "first_active_date", "last_active_date"):
         assert col in q
 
 

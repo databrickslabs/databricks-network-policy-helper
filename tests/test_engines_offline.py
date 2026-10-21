@@ -75,6 +75,109 @@ def test_read_inbound_network_denied_degrades_when_table_absent(monkeypatch):
     assert ing._read_inbound_network_denied(object(), 30) is None  # best-effort → None, no crash
 
 
+def test_read_inbound_network_candidates_degrades_when_table_absent(monkeypatch):
+    import dbx_nwp_helper.sql as sqlmod
+
+    def _raise(_c, _t):
+        raise Exception("TABLE_OR_VIEW_NOT_FOUND: system.access.inbound_network")
+
+    monkeypatch.setattr(sqlmod, "query", _raise)
+    assert ing._read_inbound_network_candidates(object(), 30, 1) is None  # best-effort → None
+
+
+def _inbound_candidate(public_ip, events=2, principals=("a@x.com",)):
+    return {
+        "public_ip": public_ip,
+        "events": events,
+        "principals": len(principals),
+        "active_days": 1,
+        "principal_list": list(principals),
+        "first_active_date": "2026-01-01",
+        "last_active_date": "2026-01-02",
+    }
+
+
+def test_merge_candidates_adds_only_new_public_ips():
+    # Dry-run-denial inbound rows fold into the audit candidates as NEW public IPs only; an IP already
+    # in the audit set keeps its (richer) audit row; private / reserved IPs are dropped.
+    audit = pd.DataFrame([{"public_ip": "203.0.55.10", "events": 100}])
+    inbound = pd.DataFrame(
+        [
+            _inbound_candidate("93.184.216.7"),  # new, public → added
+            _inbound_candidate("203.0.55.10"),  # already in audit → not duplicated
+            _inbound_candidate("10.0.0.5"),  # private → dropped
+        ]
+    )
+    merged, added = ing._merge_candidates(audit, inbound, include_ipv6=False)
+    assert added == 1
+    ips = list(merged["public_ip"])
+    assert ips.count("203.0.55.10") == 1  # not duplicated
+    assert "93.184.216.7" in ips
+    assert "10.0.0.5" not in ips  # private filtered out
+
+
+def test_merge_candidates_respects_ipv6_toggle():
+    audit = pd.DataFrame(columns=["public_ip", "events"])
+    inbound = pd.DataFrame([_inbound_candidate("2606:4700::1111")])
+    _, added_off = ing._merge_candidates(audit, inbound, include_ipv6=False)
+    assert added_off == 0  # IPv6 skipped by default
+    _, added_on = ing._merge_candidates(audit, inbound, include_ipv6=True)
+    assert added_on == 1
+
+
+def test_analyze_folds_in_inbound_dry_run_candidate(monkeypatch, candidates_df):
+    # A public IP that only shows up as a dry-run denial in inbound_network becomes an allow-list
+    # candidate (and a suggestion), even though it's absent from the audit candidate set.
+    _patch_feeds(monkeypatch)
+    import dbx_nwp_helper.sql as sqlmod
+
+    def fake_query(_conn, text):
+        if "outbound_network" in text:
+            return pd.DataFrame()
+        if "DRY_RUN_DENIAL" in text:  # the candidate_ips_from_inbound_network query
+            return pd.DataFrame([_inbound_candidate("93.184.216.42", events=9)])
+        if "inbound_network" in text:  # the DROP denied-view query
+            return pd.DataFrame()
+        if "IpAccessDenied" in text:
+            return pd.DataFrame(columns=["source_ip"])
+        return candidates_df
+
+    monkeypatch.setattr(sqlmod, "query", fake_query)
+    cfg = IngressConfig(enable_rdap=False, scoping_mode="ip_only", policy_scope="all_workspaces")
+    analysis = ing.analyze(cfg, None, _FakeWorkspaceClient())
+    assert "93.184.216.42" in set(analysis.candidates["public_ip"])
+
+
+def test_analyze_skips_inbound_candidates_when_disabled(monkeypatch, candidates_df):
+    _patch_feeds(monkeypatch)
+    import dbx_nwp_helper.sql as sqlmod
+
+    seen = {"dry_run_queried": False}
+
+    def fake_query(_conn, text):
+        if "outbound_network" in text:
+            return pd.DataFrame()
+        if "DRY_RUN_DENIAL" in text:
+            seen["dry_run_queried"] = True
+            return pd.DataFrame([_inbound_candidate("93.184.216.42")])
+        if "inbound_network" in text:
+            return pd.DataFrame()
+        if "IpAccessDenied" in text:
+            return pd.DataFrame(columns=["source_ip"])
+        return candidates_df
+
+    monkeypatch.setattr(sqlmod, "query", fake_query)
+    cfg = IngressConfig(
+        enable_rdap=False,
+        scoping_mode="ip_only",
+        policy_scope="all_workspaces",
+        include_inbound_network=False,
+    )
+    analysis = ing.analyze(cfg, None, _FakeWorkspaceClient())
+    assert seen["dry_run_queried"] is False  # the candidate query never ran
+    assert "93.184.216.42" not in set(analysis.candidates["public_ip"])
+
+
 class _FakeIpAclApi:
     def __init__(self, acls):
         self._acls = acls
@@ -134,7 +237,7 @@ def candidates_df():
     )
 
 
-def _patch_feeds(monkeypatch, threat_rows=None, cloud_rows=None, dbx_rows=None):
+def _patch_feeds(monkeypatch, threat_rows=None, cloud_rows=None, dbx_rows=None, partner_rows=None):
     from dbx_nwp_helper.feeds import loaders
 
     monkeypatch.setattr(
@@ -143,6 +246,13 @@ def _patch_feeds(monkeypatch, threat_rows=None, cloud_rows=None, dbx_rows=None):
         lambda feeds, refresh=False: pd.DataFrame(
             threat_rows or [],
             columns=["cidr", "source_feed", "threat_type", "confidence", "source_url", "loaded_at"],
+        ),
+    )
+    monkeypatch.setattr(
+        loaders,
+        "partner_ranges",
+        lambda refresh=False: pd.DataFrame(
+            partner_rows or [], columns=["cidr", "partner", "region", "source_url", "loaded_at"]
         ),
     )
     monkeypatch.setattr(
@@ -232,6 +342,36 @@ def test_ingress_databricks_owned_takes_precedence(monkeypatch, candidates_df):
     recs = {r["rdap_owner"]: r for _, r in analysis.suggestions.iterrows()}
     dbx_group = [r for r in recs.values() if r["databricks_owned"]]
     assert dbx_group and dbx_group[0]["recommendation"] == "ALLOW — Databricks-owned"
+
+
+def test_ingress_partner_platform_ip_labelled_and_allowed(monkeypatch, candidates_df):
+    # 203.0.55.10 falls in a Power BI partner range → labelled as the partner, recommended ALLOW,
+    # and included as an allow rule (even though it also sits in a cloud range).
+    _patch_feeds(
+        monkeypatch,
+        cloud_rows=[("203.0.55.0/24", "azure", "svc", "eastus", "2026-01-01")],
+        partner_rows=[("203.0.55.0/24", "Power BI", "", "https://x", "2026-01-01")],
+    )
+    import dbx_nwp_helper.sql as sqlmod
+
+    def _q(_c, t):
+        if "inbound_network" in t:
+            return pd.DataFrame()
+        if "IpAccessDenied" in t:
+            return pd.DataFrame(columns=["source_ip"])
+        return candidates_df
+
+    monkeypatch.setattr(sqlmod, "query", _q)
+    cfg = IngressConfig(enable_rdap=False, scoping_mode="ip_only", policy_scope="all_workspaces")
+    analysis = ing.analyze(cfg, None, _FakeWorkspaceClient())
+    pbi = [r for r in analysis.suggestion_rows if r.get("partners")]
+    assert pbi and pbi[0]["partners"] == ["Power BI"]
+    assert pbi[0]["recommendation"] == "ALLOW — Power BI platform"
+
+    policies = rules.build_rules(analysis, cfg)
+    previews = rules.preview_blocks(policies, cfg)
+    labels = [r["label"] for r in previews["__ALL__"]["ingress_dry_run"]["public_access"]["allow_rules"]]
+    assert any("Power-BI" in lbl for lbl in labels)  # clean partner label, not cloud-prefixed
 
 
 def test_egress_classification_and_block(monkeypatch):
