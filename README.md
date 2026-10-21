@@ -84,7 +84,7 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 
 **Command-specific:**
 
-- 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--threat-deny-rules`, `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--include-inbound-network` (use dry-run CBI denials as allow-list candidates; on by default), `--disable-existing-ip-acls`. Existing IP access lists are **auto-detected** and you're prompted (a per-entry checkbox) to migrate them; front-end PrivateLink (the workspace PAS) is likewise **auto-detected** on AWS/GCP and offered for migration into a `private_access` block — no flags.
+- 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--threat-deny-rules`, `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--include-inbound-network` (use dry-run CBI denials as allow-list candidates; on by default), `--disable-existing-ip-acls`. Existing IP access lists are **auto-detected** and you're prompted (a per-entry checkbox) to migrate them; on AWS/GCP a **non-allow-all** front-end PrivateLink PAS is likewise **auto-detected** and offered for migration into a `private_access` block, and any existing CBI `private_access` is carried forward — no flags. (Azure doesn't migrate PrivateLink.)
 - 📤 **`egress`**: `--block-threat-domains` (off/matched_only/all), `--threat-feed`, `--source-type-filter`.
 
 ## 🗺️ How each command flows
@@ -111,7 +111,7 @@ flowchart TD
     G --> FEPL
     G2 --> FEPL
     G3 --> FEPL
-    FEPL["Front-end PrivateLink auto-detected (AWS/GCP PAS) → mirror into private_access<br/>private-only ⇒ skip public allow-list; Azure ⇒ flag to verify"] --> H
+    FEPL["AWS/GCP: non-allow-all PAS → migrate into private_access; else copy existing private_access fwd<br/>Azure: no PrivateLink migration (ui_api default-allowed) — IP ACLs → public only"] --> H
     H["Existing IP ACLs auto-detected → prompt to migrate (kept with traffic rules)<br/>partner-platform IPs (Power BI / dbt) flagged + recommended<br/>+ threat-deny rules + deny-denied-IPs optional<br/>cross-workspace left in compatibility mode"] --> P["Preview proposed policy"]
     P --> EXP{"--export?"}
     EXP -->|yes| EXPW["Write JSON + Terraform"]
@@ -124,9 +124,10 @@ flowchart TD
     SC -->|per_workspace| PW["One policy per workspace: name-ws-id<br/>no pre-checks"]
     SC -->|"current / all_workspaces"| PFq{"Assigned policy safe to bind?"}
     PFq -->|"enforced restrictive public ingress"| X3["ABORT"]
+    PFq -->|"enforced private + migrating non-allow-all PAS"| X3
     PFq -->|"new id would drop enforced egress"| X3
     PFq -->|"dry-run restrictive → warn"| WR["Warn, continue"]
-    PFq -->|"new id drops private/xws → warn"| WR
+    PFq -->|"new id drops cross-workspace → warn"| WR
     PFq -->|"clean / allow-all"| WR
     WR --> WMODE{"--policy-mode"}
     U --> WMODE
@@ -377,12 +378,16 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   other block via the permissive default), they abort if that would drop an enforced restrictive
   block — pointing you at `--policy-action add_to_existing --existing-policy-id <id>` to keep it. An
   allow-all assigned policy, or updating the same id in place, is fine.
-- **Front-end PrivateLink & cross-workspace.** A PrivateLink workspace no longer aborts ingress: on
-  AWS/GCP the CLI reads the workspace's Private Access Settings and offers to mirror them into a
-  `private_access` block (private-only workspaces skip the moot public allow-list); Azure is flagged
-  for you to verify (no PAS object exists to read). Cross-workspace access is left in **compatibility
-  mode** — existing private-access / cross-workspace config is preserved untouched on a same-id
-  update, and a new-id rebind warns rather than clobbering.
+- **Front-end PrivateLink & cross-workspace.** A PrivateLink workspace no longer aborts ingress;
+  public and private access migrate independently. On **AWS/GCP** the CLI reads the workspace's
+  Private Access Settings and migrates a **non-allow-all** PAS (specific registered endpoints) into a
+  `private_access` block (an allow-all PAS needs nothing — CBI defaults to allowing all registered
+  endpoints). On **Azure** front-end PrivateLink is not migrated at all (`databricks_ui_api` endpoints
+  are default-allowed; the public-access flag isn't retired) — Azure just migrates IP ACLs into public
+  access. On **all clouds** an existing CBI `private_access` block is **copied forward** into the new
+  policy. The preflight guards public and private independently (abort on an *enforced* restrictive
+  block in the direction being migrated; dry-run warns). Cross-workspace access is left in
+  **compatibility mode** — preserved untouched on a same-id update; a new-id rebind warns.
 - Requires `databricks-sdk>=0.152.0` for the network-policy dataclasses — including the
   `private_access` / `cross_workspace_access` blocks (pinned in `pyproject.toml`).
 - **Applying a policy needs account-level auth**, which is separate from workspace auth — a workspace

@@ -73,15 +73,33 @@ def public_restrictive(ingress) -> bool:
     return ingress is not None and _block_restrictive(getattr(ingress, "public_access", None))
 
 
+def private_restrictive(ingress) -> bool:
+    """True if the ingress block's private_access (front-end PrivateLink) sub-block is restrictive."""
+    return ingress is not None and _block_restrictive(getattr(ingress, "private_access", None))
+
+
+def cross_workspace_restrictive(ingress) -> bool:
+    """True if the ingress block's cross_workspace_access sub-block is restrictive. (LEGACY_MODE —
+    compatibility — and FULL_ACCESS are not restrictive.)"""
+    return ingress is not None and _block_restrictive(getattr(ingress, "cross_workspace_access", None))
+
+
 def private_or_xws_restrictive(ingress) -> bool:
     """True if the ingress block's private_access (PrivateLink) or cross_workspace_access sub-block
-    is restrictive. A same-id update preserves these untouched (apply_ingress); this flags the case
-    where creating a NEW policy id would rebind the workspace and drop them, so the CLI can warn."""
-    if ingress is None:
-        return False
-    return _block_restrictive(getattr(ingress, "private_access", None)) or _block_restrictive(
-        getattr(ingress, "cross_workspace_access", None)
-    )
+    is restrictive."""
+    return private_restrictive(ingress) or cross_workspace_restrictive(ingress)
+
+
+def existing_private_access(policy):
+    """The private_access SDK sub-block already on a fetched policy (preferring the enforced `ingress`
+    block, else `ingress_dry_run`), or None. Used to copy an existing CBI private-access config
+    forward into a newly generated policy so a public-access migration never drops it."""
+    for attr in ("ingress", "ingress_dry_run"):
+        blk = getattr(policy, attr, None)
+        pa = getattr(blk, "private_access", None) if blk is not None else None
+        if pa is not None:
+            return pa
+    return None
 
 
 def egress_restrictive(egress) -> bool:

@@ -210,9 +210,10 @@ def build_rules(
         allow, deny = limits.enforce_limits(list(target_specs[tgt]), list(deny_specs), label, _limit_warn)
         policies[tgt] = {"allow": allow, "deny": deny}
 
-    # A private-access-only policy (front-end PrivateLink migration with the public allow-list
-    # skipped) can legitimately have no public allow/deny rules — seed a single target so the
-    # private_access block is still built, previewed, and applied.
+    # When we're carrying/migrating a private_access block but the public analysis produced no
+    # targets (no observed traffic, no IP ACLs), seed a single target so the private_access block is
+    # still built, previewed, and applied (the public_access block comes out RESTRICTED with no allow
+    # rules in that case).
     if cfg.private_access and not policies:
         policies[ALL_WORKSPACES] = {"allow": [], "deny": []}
 
@@ -364,26 +365,11 @@ def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note
 
 
 # ------------------------------------------------------------------------------- preview + apply
-def _private_access_block(cfg: IngressConfig):
-    """The CBI private-access sub-block for this run (front-end PrivateLink migration), or None when
-    there's no PAS to mirror. Built from cfg.private_access, which the CLI populates from the
-    workspace's Private Access Settings."""
-    pa = cfg.private_access
-    if not pa:
-        return None
-    return policy.build_private_access_block(pa.get("mode"), pa.get("endpoint_ids"))
-
-
 def _ingress_block(allow, deny, cfg: IngressConfig, note: Note = lambda _m: None):
-    """build_ingress_block with this run's private-access block + public-inclusion decision applied,
-    so preview / export / apply all emit the same shape."""
-    return policy.build_ingress_block(
-        allow,
-        deny,
-        note,
-        private_access=_private_access_block(cfg),
-        include_public=not cfg.skip_public_ingress,
-    )
+    """build_ingress_block with this run's private-access block attached (a migrated non-allow-all PAS
+    on AWS/GCP, or an existing private_access block carried forward), so preview / export / apply all
+    emit the same shape. The public allow-list is always built (public and private are independent)."""
+    return policy.build_ingress_block(allow, deny, note, private_access=cfg.private_access)
 
 
 def _single_policy_id(cfg: IngressConfig, profile: str | None, this_workspace_id) -> str:

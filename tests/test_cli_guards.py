@@ -820,38 +820,36 @@ def test_ingress_preflight_no_longer_aborts_on_pas(monkeypatch):
     cli._ingress_preflight(object(), 42, "new-id", yes=True)  # must not raise
 
 
-def test_ingress_preflight_warns_on_private_config_new_id_then_proceeds(monkeypatch, capsys):
-    # A NEW policy id rebind that would drop the assigned policy's private-access / cross-workspace
-    # rules now WARNS (pointing at add_to_existing) instead of aborting.
+def test_ingress_preflight_warns_on_xws_new_id_then_proceeds(monkeypatch, capsys):
+    # A NEW policy id rebind that would drop the assigned policy's cross-workspace rules WARNS
+    # (pointing at add_to_existing) — private-access is copied forward, so only xws warns.
     monkeypatch.setattr(
         "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(ingress="X"))
     )
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: ing == "X")
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.cross_workspace_restrictive", lambda ing: ing == "X")
     monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: False)
     cli._ingress_preflight(object(), 42, "new-id", yes=True)  # must not raise
     out = capsys.readouterr().out
-    assert "private-access or" in out and "add_to_existing" in out
+    assert "cross-workspace" in out and "add_to_existing" in out
 
 
-def test_ingress_preflight_same_id_no_private_warning(monkeypatch, capsys):
-    # Updating the SAME id preserves private-access / cross-workspace (apply_ingress), so no warning.
+def test_ingress_preflight_same_id_no_xws_warning(monkeypatch, capsys):
+    # Updating the SAME id preserves cross-workspace (apply_ingress), so no warning.
     monkeypatch.setattr(
         "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(ingress="X"))
     )
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: ing == "X")
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.cross_workspace_restrictive", lambda ing: ing == "X")
     monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: False)
     cli._ingress_preflight(object(), 42, "p1", yes=True)  # same id → must not warn/raise
-    assert "private-access or" not in capsys.readouterr().out
+    assert "cross-workspace" not in capsys.readouterr().out
 
 
 def test_ingress_preflight_aborts_on_enforced_public(monkeypatch):
     import typer
 
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
     monkeypatch.setattr(
         "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(ingress="ENF"))
     )
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
     monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: ing == "ENF")
     with pytest.raises(typer.Exit) as e:
         cli._ingress_preflight(object(), 42, "new-id", yes=True)
@@ -859,20 +857,117 @@ def test_ingress_preflight_aborts_on_enforced_public(monkeypatch):
 
 
 def test_ingress_preflight_warns_on_dry_run_public_then_proceeds(monkeypatch, capsys):
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
     monkeypatch.setattr(
         "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(ingress=None, dry="DRY"))
     )
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
     monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: ing == "DRY")
     cli._ingress_preflight(object(), 42, "new-id", yes=True)  # must not raise
     assert "DRY-RUN" in capsys.readouterr().out
 
 
+def test_ingress_preflight_aborts_on_enforced_private_only_when_migrating_pas(monkeypatch):
+    # The private-access guard fires ONLY when migrating a non-allow-all PAS (pas_nonallow=True):
+    # an enforced restrictive private block then aborts, but with pas_nonallow=False it's ignored.
+    import typer
+
+    monkeypatch.setattr(
+        "dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", _fake_pol(ingress="PRIV"))
+    )
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_restrictive", lambda ing: ing == "PRIV")
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.cross_workspace_restrictive", lambda ing: False)
+    # Not migrating a PAS → private block ignored, no abort.
+    cli._ingress_preflight(object(), 42, "p1", yes=True, pas_nonallow=False)
+    # Migrating a non-allow-all PAS over an enforced private block → abort.
+    with pytest.raises(typer.Exit) as e:
+        cli._ingress_preflight(object(), 42, "p1", yes=True, pas_nonallow=True)
+    assert e.value.exit_code == 1
+
+
 def test_ingress_preflight_proceeds_when_clean(monkeypatch):
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
     monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: (None, None))
     cli._ingress_preflight(object(), 42, "new-id", yes=True)  # must not raise
+
+
+def _wc(host):
+    return type("WC", (), {"config": type("C", (), {"host": host})()})()
+
+
+def test_reconcile_private_access_migrates_endpoint_pas(monkeypatch):
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr(
+        "dbx_nwp_helper.core.acl.read_private_access_settings",
+        lambda a, w: {
+            "pas_id": "pas-1",
+            "level": "ENDPOINT",
+            "endpoint_ids": ["vpce-a"],
+            "public_access_enabled": True,
+        },
+    )
+    cfg = IngressConfig()
+    migrating = cli._reconcile_private_access(
+        object(), 42, _wc("https://dbc-x.cloud.databricks.com"), cfg, yes=True
+    )
+    assert migrating is True  # non-allow-all PAS → pas_nonallow
+    assert cfg.private_access.as_dict()["restriction_mode"] == "RESTRICTED_ACCESS"
+
+
+def test_reconcile_private_access_allow_all_pas_copies_existing_forward(monkeypatch):
+    # allow-all (ACCOUNT) PAS → nothing migrated; an existing CBI private_access is carried forward.
+    from dbx_nwp_helper.config import IngressConfig
+
+    sentinel = object()
+    monkeypatch.setattr(
+        "dbx_nwp_helper.core.acl.read_private_access_settings",
+        lambda a, w: {
+            "pas_id": "pas-1",
+            "level": "ACCOUNT",
+            "endpoint_ids": [],
+            "public_access_enabled": True,
+        },
+    )
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", object()))
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.existing_private_access", lambda pol: sentinel)
+    cfg = IngressConfig()
+    migrating = cli._reconcile_private_access(
+        object(), 42, _wc("https://x.gcp.databricks.com"), cfg, yes=True
+    )
+    assert migrating is False
+    assert cfg.private_access is sentinel
+
+
+def test_reconcile_private_access_azure_skips_pas_but_copies_forward(monkeypatch):
+    # Azure: never reads a PAS (front-end PL isn't migrated), but still carries existing private fwd.
+    from dbx_nwp_helper.config import IngressConfig
+
+    seen = {"pas_read": False}
+
+    def _pas(a, w):
+        seen["pas_read"] = True
+        return None
+
+    sentinel = object()
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.read_private_access_settings", _pas)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: ("p1", object()))
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.existing_private_access", lambda pol: sentinel)
+    cfg = IngressConfig()
+    migrating = cli._reconcile_private_access(
+        object(), 42, _wc("https://adb-1.2.azuredatabricks.net"), cfg, yes=True
+    )
+    assert migrating is False
+    assert seen["pas_read"] is False  # no PAS read on Azure
+    assert cfg.private_access is sentinel
+
+
+def test_reconcile_private_access_noop_without_account():
+    from dbx_nwp_helper.config import IngressConfig
+
+    cfg = IngressConfig()
+    assert (
+        cli._reconcile_private_access(None, 42, _wc("https://x.cloud.databricks.com"), cfg, yes=True) is False
+    )
+    assert cfg.private_access is None
 
 
 def _egr(restricted=True, enforced=True):

@@ -38,8 +38,11 @@ CustomerFacingIngressNetworkPolicyPrivateAccess          # front-end PrivateLink
     PrivateRequestOrigin ├── all_registered_endpoints: bool   # any endpoint registered to the account
                          ├── endpoints: Endpoints(endpoint_ids: [str])   # specific registered endpoints
                          ├── all_private_access / azure_workspace_private_link: bool   # deny-rule only
-    # PAS level ACCOUNT  -> ALLOW_ALL_REGISTERED_ENDPOINTS; level ENDPOINT -> RESTRICTED_ACCESS with
-    # endpoints=allowed_vpc_endpoint_ids (mapped across as-is). See core/policy.build_private_access_block.
+    # AWS/GCP migration (core/policy.build_private_access_block): a non-allow-all PAS (level ENDPOINT)
+    # -> RESTRICTED_ACCESS with endpoints=allowed_vpc_endpoint_ids (mapped across as-is). An allow-all
+    # (ACCOUNT) PAS needs no migration (CBI already defaults to allowing all registered endpoints).
+    # Azure does NOT migrate front-end PrivateLink at all. On all clouds, an existing private_access
+    # block on the assigned policy is copied forward into the generated policy.
 
 CustomerFacingIngressNetworkPolicyCrossWorkspaceAccess   # serverless workspace→workspace ingress
 ├── restriction_mode: {FULL_ACCESS | LEGACY_MODE | RESTRICTED_ACCESS}   # LEGACY_MODE = "compatibility"

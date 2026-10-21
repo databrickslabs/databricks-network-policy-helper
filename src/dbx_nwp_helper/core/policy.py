@@ -129,48 +129,43 @@ def build_ingress_block(
     deny: list[dict],
     note: Note = lambda _m: None,
     private_access=None,
-    include_public: bool = True,
 ):
     """Assemble a CustomerFacingIngressNetworkPolicy from allow specs (+ optional deny specs), plus an
-    optional private-access sub-block (front-end PrivateLink).
+    optional private-access sub-block (front-end PrivateLink, migrated or carried forward).
 
+    The public_access block is always built — public and private access are migrated independently.
     RESTRICTED_ACCESS is default-DENY; if a policy ends up with deny rules but no allow rules,
     everything would be blocked — add a catch-all allow (all public IPs) to preserve
-    "block these, allow the rest".
-
-    `include_public=False` omits the public_access sub-block entirely — used for a **private-only**
-    workspace (PAS public_access_enabled=False), where a public source-IP allow-list is moot; the
-    caller must then supply `private_access`. `cross_workspace_access` is deliberately never set here:
-    it's left at the account default (compatibility mode) and preserved as-is on update
-    (see apply_ingress)."""
+    "block these, allow the rest". `cross_workspace_access` is deliberately never set here: it's left
+    at the account default (compatibility mode) and preserved as-is on update (see apply_ingress)."""
     from databricks.sdk.service.settings import (  # noqa: I001
         CustomerFacingIngressNetworkPolicy as IngressPolicy,
         CustomerFacingIngressNetworkPolicyPublicAccess as PublicAccess,
         CustomerFacingIngressNetworkPolicyPublicAccessRestrictionMode as RestrictionMode,
     )
 
-    ingress = IngressPolicy()
-    if include_public:
-        allow = list(allow)
-        if (deny or []) and not allow:
-            allow = [
-                {
-                    "label": "allow-all",
-                    "catch_all": True,
-                    "destination": "all_destinations",
-                    "identity_type": "ALL_USERS",
-                    "identities": [],
-                }
-            ]
-            note(
-                "Policy has deny rules but no allow rules — added a catch-all allow (all public IPs) "
-                "so non-denied traffic is still permitted (default-allow-except-blocked)."
-            )
-        ingress.public_access = PublicAccess(
+    allow = list(allow)
+    if (deny or []) and not allow:
+        allow = [
+            {
+                "label": "allow-all",
+                "catch_all": True,
+                "destination": "all_destinations",
+                "identity_type": "ALL_USERS",
+                "identities": [],
+            }
+        ]
+        note(
+            "Policy has deny rules but no allow rules — added a catch-all allow (all public IPs) "
+            "so non-denied traffic is still permitted (default-allow-except-blocked)."
+        )
+    ingress = IngressPolicy(
+        public_access=PublicAccess(
             restriction_mode=RestrictionMode.RESTRICTED_ACCESS,
             allow_rules=[build_ingress_rule(s) for s in allow],
             deny_rules=[build_deny_rule(s) for s in (deny or [])] or None,
         )
+    )
     if private_access is not None:
         ingress.private_access = private_access
     return ingress

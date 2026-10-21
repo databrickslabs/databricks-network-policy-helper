@@ -746,6 +746,23 @@ def test_read_private_access_settings_none_on_error():
     assert acl_core.read_private_access_settings(acct, 42) is None
 
 
+def test_existing_private_access_prefers_enforced_then_dry_run():
+    # Returns the private_access from the enforced ingress block first, else the dry-run block, else None.
+    import types
+
+    def _ing(pa):
+        return types.SimpleNamespace(private_access=pa)
+
+    enforced = types.SimpleNamespace(ingress=_ing("ENF-PA"), ingress_dry_run=_ing("DRY-PA"))
+    assert acl_core.existing_private_access(enforced) == "ENF-PA"
+
+    dry_only = types.SimpleNamespace(ingress=_ing(None), ingress_dry_run=_ing("DRY-PA"))
+    assert acl_core.existing_private_access(dry_only) == "DRY-PA"
+
+    none = types.SimpleNamespace(ingress=None, ingress_dry_run=None)
+    assert acl_core.existing_private_access(none) is None
+
+
 def _policy_account(assigned_policy_id, policy_obj):
     class _WNC:
         def get_workspace_network_option_rpc(self, workspace_id):

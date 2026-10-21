@@ -116,23 +116,27 @@ Before any analysis or write, the CLI shows the **target workspace** (profile / 
 you to confirm it — so a mis-set `--profile` can't act on the wrong workspace (skip with `--yes`).
 
 **Pre-checks (create + assign only).** When the run will create **and** assign a single policy, the
-CLI first checks the target workspace and **aborts** if the assigned policy already **enforces**
-restrictive public ingress. A restrictive *dry-run* public policy only warns (assigning replaces it),
-and an allow-all policy (e.g. the account's `default-policy`) is fine. It also guards the **opposite
-direction**: if creating the policy under a **new** id would rebind the workspace and drop an
-existing restrictive **egress** on the assigned policy (the new policy carries a `FULL_ACCESS` egress
-default), it aborts on an enforced egress (warns on a dry-run one) — use `add_to_existing` to keep
-it. A new-id rebind that would drop the assigned policy's **private-access / cross-workspace** config
-now warns (pointing at `add_to_existing`) rather than aborting. Updating the same id in place
-preserves the other direction and those sub-blocks. Skipped for `per_workspace` and `add_to_existing`.
+CLI checks the target workspace and guards the public and private directions **independently**:
+- **Public** (always migrated): **abort** if the assigned policy already **enforces** restrictive
+  public ingress; a *dry-run* restrictive public policy only warns (assigning replaces it).
+- **Private** (only when migrating a non-allow-all PAS): **abort** if the assigned policy **enforces**
+  restrictive private access; a *dry-run* one warns.
 
-**Front-end PrivateLink (private access).** A PrivateLink workspace is no longer refused. On AWS/GCP
-the CLI reads the workspace's Private Access Settings (PAS) and offers to mirror it into the policy's
-`private_access` block — PAS level `ACCOUNT` → allow all registered endpoints; level `ENDPOINT` → the
-specific allowed endpoint ids, mapped across as-is. A **private-only** workspace (public access
-disabled) skips the moot public source-IP allow-list and builds a private-access-only policy. **Azure**
-has no PAS object to read, so the CLI flags it and asks you to verify front-end Private Link yourself.
-Needs account-admin auth (to read the PAS), so it's a no-op on a propose-only run without one.
+An allow-all policy (e.g. the account's `default-policy`) is fine. It also guards the **egress**
+direction: creating under a **new** id that would rebind the workspace and drop an existing restrictive
+egress aborts on an enforced egress (warns on a dry-run one) — use `add_to_existing` to keep it. A
+new-id rebind that would drop a **cross-workspace** block warns (private-access is copied forward, so
+it isn't dropped). Skipped for `per_workspace` and `add_to_existing`.
+
+**Front-end PrivateLink (private access).** A PrivateLink workspace is no longer refused; public and
+private migrate independently. On **AWS/GCP** the CLI reads the workspace's Private Access Settings
+(PAS) and migrates a **non-allow-all** PAS (specific registered endpoints → `private_access`, ids
+mapped across as-is); an allow-all PAS needs nothing (CBI defaults to allowing all registered
+endpoints). On **Azure** front-end PrivateLink is **not** migrated (the `databricks_ui_api` endpoints
+are default-allowed and additive, and the public-access flag isn't retired) — Azure just migrates IP
+ACLs into public access. On **all clouds**, an existing CBI `private_access` block on the assigned
+policy is **copied forward**. Needs account-admin auth (to read the PAS / assigned policy), so it's a
+no-op on a propose-only run without one.
 
 **Cross-workspace access** is left in **compatibility mode** (the account default) — this tool doesn't
 build cross-workspace rules yet, and any existing cross-workspace config is preserved untouched on a

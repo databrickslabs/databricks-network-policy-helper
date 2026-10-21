@@ -106,15 +106,12 @@ class IngressConfig:
     # (_reconcile_ip_acls); defaults to True so a --yes / non-interactive run migrates them.
     migrate_ip_acls: bool = True
     deny_denied_ips: bool = False
-    # Front-end PrivateLink (private access) migration, populated by the CLI from the workspace's
-    # Private Access Settings (PAS). None = no PAS / not migrating; otherwise
-    # {"mode": "ACCOUNT"|"ENDPOINT", "endpoint_ids": [...]} — mapped straight into a CBI private_access
-    # block (see core.policy.build_private_access_block). Azure has no PAS, so this stays None there
-    # and the CLI prints a flag instead.
-    private_access: dict | None = None
-    # When the workspace is private-only (PAS public_access_enabled=False), skip the public source-IP
-    # allow-list (it's moot — public access is disabled) and build a private-access-only policy.
-    skip_public_ingress: bool = False
+    # The CBI private_access SDK block to attach to the generated policy, or None. Populated by the
+    # CLI (_reconcile_private_access) either by migrating a non-allow-all PAS (AWS/GCP — specific
+    # registered endpoints) or by copying an existing policy's private_access forward (all clouds).
+    # Azure never migrates PrivateLink (ui_api endpoints are default-allowed), so it only ever carries
+    # an existing block forward. Held as the SDK object so preview/export/apply emit it verbatim.
+    private_access: object | None = None
     # Interactively pick which proposed allow rules to keep (checkbox), before they're built. On by
     # default in interactive runs; skipped under --yes / non-interactive or with --no-select-rules.
     select_rules: bool = True

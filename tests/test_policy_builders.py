@@ -159,15 +159,6 @@ def test_build_ingress_block_includes_private_access():
     assert blk["private_access"]["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
 
 
-def test_build_ingress_block_skip_public_private_only():
-    # Private-only workspace: no public_access block, just private_access.
-    blk = policy.build_ingress_block(
-        [], [], private_access=policy.build_private_access_block("ACCOUNT"), include_public=False
-    ).as_dict()
-    assert "public_access" not in blk
-    assert blk["private_access"]["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
-
-
 def test_apply_ingress_update_preserves_existing_private_and_cross_workspace():
     # A same-id update that rebuilds only public_access must NOT drop a private_access /
     # cross_workspace_access block the existing policy already carried (full-replace, but preserved).
