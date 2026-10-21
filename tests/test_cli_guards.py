@@ -626,15 +626,15 @@ def test_confirm_workspace_bad_profile_exits_cleanly(monkeypatch, capsys):
         auth,
         "workspace_client",
         lambda conn: (_ for _ in ()).throw(
-            ValueError("resolve: /Users/x/.databrickscfg has no sfe-cloud profile configured")
+            ValueError("resolve: /Users/x/.databrickscfg has no acme-ws profile configured")
         ),
     )
-    monkeypatch.setattr(cli, "_available_profiles", lambda: ["sfe-foghorn", "e2-dogfood"])
+    monkeypatch.setattr(cli, "_available_profiles", lambda: ["acme-dev", "acme-prod"])
     with pytest.raises(typer.Exit) as exc:
-        cli._confirm_workspace(Connection(profile="sfe-cloud"), yes=True)
+        cli._confirm_workspace(Connection(profile="acme-ws"), yes=True)
     assert exc.value.exit_code == 1
     out = capsys.readouterr().out
-    assert "sfe-cloud" in out and "sfe-foghorn" in out  # names the bad profile + lists available
+    assert "acme-ws" in out and "acme-dev" in out  # names the bad profile + lists available
 
 
 def test_account_client_bad_profile_exits_cleanly(monkeypatch, capsys):

@@ -402,8 +402,8 @@ def test_apply_current_workspace_names_policy_from_profile_when_name_blank():
     cfg.apply.create_policy = True
     pols = rules.build_rules(a, cfg)
     acct = _FakeAccount()
-    results = rules.apply(pols, cfg, acct, account_id="acc", this_workspace_id=555, profile="sfe-plain")
-    assert results[0]["policy_id"] == "sfe-plain"
+    results = rules.apply(pols, cfg, acct, account_id="acc", this_workspace_id=555, profile="acme-ws")
+    assert results[0]["policy_id"] == "acme-ws"
     assert results[0]["target"] == "current_workspace"
 
 

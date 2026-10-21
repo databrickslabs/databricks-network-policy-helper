@@ -331,15 +331,15 @@ def test_policy_name_single_truncates_prefix():
 
 
 def test_policy_name_per_workspace_keeps_full_id():
-    name = policy.policy_name("np-helper", workspace_id=1657683783405196)
+    name = policy.policy_name("np-helper", workspace_id=1234567890123456)
     # the full workspace id is always preserved, even if the prefix must be trimmed
-    assert name.endswith("-ws-1657683783405196")
+    assert name.endswith("-ws-1234567890123456")
 
 
 def test_policy_name_per_workspace_trims_long_prefix():
     # a long prefix + a long ws id exceeds the 30-char budget -> prefix trimmed, id kept whole
-    name = policy.policy_name("really-long-prefix-name", workspace_id=1657683783405196)
-    assert name.endswith("-ws-1657683783405196")
+    name = policy.policy_name("really-long-prefix-name", workspace_id=1234567890123456)
+    assert name.endswith("-ws-1234567890123456")
     assert not name.startswith("really-long-prefix-name")
 
 
@@ -349,7 +349,7 @@ def test_policy_name_long_prefix_per_workspace_within_budget():
 
 
 def test_policy_name_current_workspace_uses_profile_suffix():
-    assert policy.policy_name("np-helper", suffix="sfe-plain") == "np-helper-sfe-plain"
+    assert policy.policy_name("np-helper", suffix="acme-ws") == "np-helper-acme-ws"
 
 
 def test_policy_name_suffix_is_slugified():
