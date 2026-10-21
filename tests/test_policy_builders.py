@@ -132,28 +132,43 @@ def test_apply_ingress_update_clears_opposite_mode_field():
     assert acct.updated.ingress_dry_run is not None  # new dry-run block set
 
 
-def test_build_private_access_block_account_level():
-    blk = policy.build_private_access_block("ACCOUNT").as_dict()
+def test_build_private_access_block_allow_all():
+    blk = policy.build_private_access_block("ALLOW_ALL_REGISTERED_ENDPOINTS").as_dict()
     assert blk["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
     assert not blk.get("allow_rules")  # no per-endpoint rules needed at account level
 
 
-def test_build_private_access_block_endpoint_level_maps_ids():
-    blk = policy.build_private_access_block("ENDPOINT", ["vpce-aaa", "vpce-bbb"]).as_dict()
+def test_build_private_access_block_restricted_maps_ids_and_label():
+    blk = policy.build_private_access_block(
+        "RESTRICTED_ACCESS", ["vpce-aaa", "vpce-bbb"], label="my-pas"
+    ).as_dict()
     assert blk["restriction_mode"] == "RESTRICTED_ACCESS"
-    endpoints = blk["allow_rules"][0]["origin"]["endpoints"]["endpoint_ids"]
-    assert endpoints == ["vpce-aaa", "vpce-bbb"]  # PAS allowed_vpc_endpoint_ids mapped across as-is
+    rule = blk["allow_rules"][0]
+    assert rule["label"] == "my-pas"  # PAS name kept as the rule label verbatim
+    assert rule["origin"]["endpoints"]["endpoint_ids"] == ["vpce-aaa", "vpce-bbb"]  # mapped as-is
 
 
-def test_build_private_access_endpoint_level_without_ids_falls_back_to_account():
-    # ENDPOINT level but no ids resolved → allow-all-registered rather than an empty restricted block.
-    blk = policy.build_private_access_block("ENDPOINT", []).as_dict()
-    assert blk["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
+def test_build_private_access_restricted_without_ids_permits_nothing():
+    # RESTRICTED_ACCESS with no endpoint ids → no allow rules (faithfully, no endpoint permitted),
+    # NOT a fall-back to allow-all.
+    blk = policy.build_private_access_block("RESTRICTED_ACCESS", []).as_dict()
+    assert blk["restriction_mode"] == "RESTRICTED_ACCESS"
+    assert not blk.get("allow_rules")
+
+
+def test_assemble_ingress_composes_independent_sub_blocks():
+    pub = policy.build_public_access_block([_allow()], [])
+    priv = policy.build_private_access_block("ALLOW_ALL_REGISTERED_ENDPOINTS")
+    blk = policy.assemble_ingress(public_access=pub, private_access=priv).as_dict()
+    assert blk["public_access"]["restriction_mode"] == "RESTRICTED_ACCESS"
+    assert blk["private_access"]["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
+    # cross_workspace omitted when not supplied
+    assert "cross_workspace_access" not in blk
 
 
 def test_build_ingress_block_includes_private_access():
     blk = policy.build_ingress_block(
-        [_allow()], [], private_access=policy.build_private_access_block("ACCOUNT")
+        [_allow()], [], private_access=policy.build_private_access_block("ALLOW_ALL_REGISTERED_ENDPOINTS")
     ).as_dict()
     assert blk["public_access"]["restriction_mode"] == "RESTRICTED_ACCESS"
     assert blk["private_access"]["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
@@ -173,7 +188,7 @@ def test_apply_ingress_update_preserves_existing_private_and_cross_workspace():
     )
 
     prior = policy.build_ingress_block(
-        [_allow()], [], private_access=policy.build_private_access_block("ACCOUNT")
+        [_allow()], [], private_access=policy.build_private_access_block("ALLOW_ALL_REGISTERED_ENDPOINTS")
     )
     prior.cross_workspace_access = XWS(restriction_mode=XWSMode.RESTRICTED_ACCESS)
     existing = AccountNetworkPolicy(
@@ -191,14 +206,14 @@ def test_apply_ingress_update_migration_overwrites_private_access():
     from databricks.sdk.service.settings import AccountNetworkPolicy
 
     prior = policy.build_ingress_block(
-        [_allow()], [], private_access=policy.build_private_access_block("ACCOUNT")
+        [_allow()], [], private_access=policy.build_private_access_block("ALLOW_ALL_REGISTERED_ENDPOINTS")
     )
     existing = AccountNetworkPolicy(
         account_id="acc", network_policy_id="p", egress=policy.build_full_access_egress(), ingress=prior
     )
     acct = _UpdateAcct(existing)
     new_block = policy.build_ingress_block(
-        [_allow()], [], private_access=policy.build_private_access_block("ENDPOINT", ["vpce-zzz"])
+        [_allow()], [], private_access=policy.build_private_access_block("RESTRICTED_ACCESS", ["vpce-zzz"])
     )
     policy.apply_ingress(acct, "acc", "p", new_block, "ingress")
     d = acct.updated.ingress.private_access.as_dict()

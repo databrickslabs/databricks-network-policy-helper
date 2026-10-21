@@ -116,31 +116,32 @@ Before any analysis or write, the CLI shows the **target workspace** (profile / 
 you to confirm it — so a mis-set `--profile` can't act on the wrong workspace (skip with `--yes`).
 
 **Pre-checks (create + assign only).** When the run will create **and** assign a single policy, the
-CLI checks the target workspace and guards the public and private directions **independently**:
-- **Public** (always migrated): **abort** if the assigned policy already **enforces** restrictive
-  public ingress; a *dry-run* restrictive public policy only warns (assigning replaces it).
-- **Private** (only when migrating a non-allow-all PAS): **abort** if the assigned policy **enforces**
-  restrictive private access; a *dry-run* one warns.
+CLI guards public and private **independently**, aborting only when a dimension it **migrates**
+collides with a **restrictive** existing CBI block in that same dimension (enforced OR dry-run):
+- **public** — abort if migrating public (observed traffic / IP access lists) and the assigned policy
+  has a restrictive public_access;
+- **private** — abort if migrating a *non-allow-all* PAS and the assigned policy has a restrictive
+  private_access.
 
 An allow-all policy (e.g. the account's `default-policy`) is fine. It also guards the **egress**
 direction: creating under a **new** id that would rebind the workspace and drop an existing restrictive
-egress aborts on an enforced egress (warns on a dry-run one) — use `add_to_existing` to keep it. A
-new-id rebind that would drop a **cross-workspace** block warns (private-access is copied forward, so
-it isn't dropped). Skipped for `per_workspace` and `add_to_existing`.
+egress aborts on an enforced egress (warns on a dry-run one) — use `add_to_existing` to keep it.
+Skipped for `per_workspace` and `add_to_existing`.
 
-**Front-end PrivateLink (private access).** A PrivateLink workspace is no longer refused; public and
-private migrate independently. On **AWS/GCP** the CLI reads the workspace's Private Access Settings
-(PAS) and migrates a **non-allow-all** PAS (specific registered endpoints → `private_access`, ids
-mapped across as-is); an allow-all PAS needs nothing (CBI defaults to allowing all registered
-endpoints). On **Azure** front-end PrivateLink is **not** migrated (the `databricks_ui_api` endpoints
-are default-allowed and additive, and the public-access flag isn't retired) — Azure just migrates IP
-ACLs into public access. On **all clouds**, an existing CBI `private_access` block on the assigned
-policy is **copied forward**. Needs account-admin auth (to read the PAS / assigned policy), so it's a
-no-op on a propose-only run without one.
+**Existing CBI ingress is reused per dimension.** Public, private and cross-workspace access are
+independent — each is built/migrated or **carried forward** from the workspace's assigned CBI policy
+(deep-copied, restrictive blocks only):
+- **public** — built net-new from observed traffic + IP ACLs; an existing restrictive public block is
+  preserved only when this run has nothing of its own to build.
+- **private** — on **AWS/GCP** a **non-allow-all** PAS (specific registered endpoints) is migrated
+  into `private_access` (ids mapped across as-is; an allow-all PAS needs nothing and never loosens a
+  stricter existing block). On **Azure** front-end PrivateLink is **not** migrated (`databricks_ui_api`
+  endpoints are default-allowed; the public-access flag isn't retired). An existing CBI private block
+  is carried forward on all clouds.
+- **cross-workspace** — never built; any existing block is carried forward verbatim.
 
-**Cross-workspace access** is left in **compatibility mode** (the account default) — this tool doesn't
-build cross-workspace rules yet, and any existing cross-workspace config is preserved untouched on a
-same-id update.
+Reading the PAS / assigned policy needs account-admin auth, so this is a no-op on a propose-only run
+without one. (Mirrors the `databricks-migrate-ip-acls` sibling's existing-policy handling.)
 
 `add_to_existing` updates only the ingress block and **leaves an existing egress as-is**; a brand-new
 policy gets a permissive `FULL_ACCESS` egress default (and, symmetrically, the egress helper leaves

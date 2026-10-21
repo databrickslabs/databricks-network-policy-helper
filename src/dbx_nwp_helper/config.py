@@ -106,12 +106,18 @@ class IngressConfig:
     # (_reconcile_ip_acls); defaults to True so a --yes / non-interactive run migrates them.
     migrate_ip_acls: bool = True
     deny_denied_ips: bool = False
-    # The CBI private_access SDK block to attach to the generated policy, or None. Populated by the
-    # CLI (_reconcile_private_access) either by migrating a non-allow-all PAS (AWS/GCP — specific
-    # registered endpoints) or by copying an existing policy's private_access forward (all clouds).
-    # Azure never migrates PrivateLink (ui_api endpoints are default-allowed), so it only ever carries
-    # an existing block forward. Held as the SDK object so preview/export/apply emit it verbatim.
+    # Ingress sub-blocks to compose into the generated policy alongside the built public allow-list
+    # (set by the CLI's _reconcile_existing_ingress). Public and private are independent dimensions;
+    # cross-workspace is never built, only carried forward. All held as SDK objects so
+    # preview/export/apply emit them verbatim.
+    #   private_access   — a non-allow-all PAS migrated into private_access (AWS/GCP), or an existing
+    #                      CBI private_access carried forward (all clouds), or None.
+    #   existing_public  — an existing restrictive CBI public_access carried forward when this run has
+    #                      no observed traffic / IP ACLs of its own to build a public block from.
+    #   existing_xws     — an existing restrictive cross_workspace_access carried forward verbatim.
     private_access: object | None = None
+    existing_public: object | None = None
+    existing_xws: object | None = None
     # Interactively pick which proposed allow rules to keep (checkbox), before they're built. On by
     # default in interactive runs; skipped under --yes / non-interactive or with --no-select-rules.
     select_rules: bool = True

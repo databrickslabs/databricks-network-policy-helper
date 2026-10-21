@@ -515,3 +515,51 @@ def test_apply_per_workspace_fans_out_and_binds():
     assert {r["target"] for r in results} == {101, 202}
     assert all(r["action"] == "created" for r in results)
     assert sorted(acct.workspace_network_configuration.bound) == [101, 202]  # each workspace bound
+
+
+def test_ingress_block_builds_public_when_rules_present():
+    # With allow/deny specs the public block is built net-new from them; private + xws are composed.
+    from dbx_nwp_helper.core import policy
+
+    cfg = IngressConfig()
+    cfg.private_access = policy.build_private_access_block("ALLOW_ALL_REGISTERED_ENDPOINTS")
+    allow = [
+        {
+            "label": "r",
+            "cidrs": ["1.2.3.4/32"],
+            "destination": "all_destinations",
+            "identity_type": "ALL_USERS",
+            "identities": [],
+        }
+    ]
+    blk = rules._ingress_block(allow, [], cfg).as_dict()
+    assert blk["public_access"]["allow_rules"][0]["origin"]["included_ip_ranges"]["ip_ranges"] == [
+        "1.2.3.4/32"
+    ]
+    assert blk["private_access"]["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
+
+
+def test_ingress_block_preserves_existing_public_when_nothing_to_build():
+    # No allow/deny specs → the existing restrictive public block is carried forward (not an empty
+    # deny-all); private + cross-workspace are carried too.
+    from dbx_nwp_helper.core import policy
+
+    cfg = IngressConfig()
+    cfg.existing_public = policy.build_public_access_block(
+        [
+            {
+                "label": "keep",
+                "cidrs": ["9.9.9.9/32"],
+                "destination": "all_destinations",
+                "identity_type": "ALL_USERS",
+                "identities": [],
+            }
+        ],
+        [],
+    )
+    cfg.private_access = policy.build_private_access_block("RESTRICTED_ACCESS", ["vpce-x"])
+    cfg.existing_xws = object()  # carried verbatim
+    blk = rules._ingress_block([], [], cfg)
+    assert blk.public_access is cfg.existing_public  # preserved, not rebuilt
+    assert blk.private_access is cfg.private_access
+    assert blk.cross_workspace_access is cfg.existing_xws

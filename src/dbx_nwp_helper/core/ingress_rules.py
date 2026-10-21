@@ -210,11 +210,11 @@ def build_rules(
         allow, deny = limits.enforce_limits(list(target_specs[tgt]), list(deny_specs), label, _limit_warn)
         policies[tgt] = {"allow": allow, "deny": deny}
 
-    # When we're carrying/migrating a private_access block but the public analysis produced no
-    # targets (no observed traffic, no IP ACLs), seed a single target so the private_access block is
-    # still built, previewed, and applied (the public_access block comes out RESTRICTED with no allow
-    # rules in that case).
-    if cfg.private_access and not policies:
+    # When the public analysis produced no targets (no observed traffic, no IP ACLs) but we still
+    # have a block to carry/migrate into some dimension (private_access, an existing public to
+    # preserve, or cross-workspace), seed a single target so those blocks are still built, previewed,
+    # and applied.
+    if not policies and (cfg.private_access or cfg.existing_public or cfg.existing_xws):
         policies[ALL_WORKSPACES] = {"allow": [], "deny": []}
 
     if cfg.policy_scope == "per_workspace" and len(policies) > MAX_POLICIES_PER_ACCOUNT:
@@ -366,10 +366,18 @@ def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note
 
 # ------------------------------------------------------------------------------- preview + apply
 def _ingress_block(allow, deny, cfg: IngressConfig, note: Note = lambda _m: None):
-    """build_ingress_block with this run's private-access block attached (a migrated non-allow-all PAS
-    on AWS/GCP, or an existing private_access block carried forward), so preview / export / apply all
-    emit the same shape. The public allow-list is always built (public and private are independent)."""
-    return policy.build_ingress_block(allow, deny, note, private_access=cfg.private_access)
+    """Compose the generated policy's ingress from independent dimensions, so preview / export / apply
+    all emit the same shape:
+      * public — built net-new from this target's observed-traffic + IP-ACL specs; when there are
+        none, an existing restrictive CBI public_access is carried forward (cfg.existing_public);
+      * private — a migrated non-allow-all PAS or an existing private_access carried forward
+        (cfg.private_access);
+      * cross-workspace — never built, always carried forward verbatim (cfg.existing_xws)."""
+    if allow or deny:
+        public = policy.build_public_access_block(allow, deny, note)
+    else:
+        public = cfg.existing_public  # nothing to build → preserve any existing restrictive public
+    return policy.assemble_ingress(public, cfg.private_access, cfg.existing_xws)
 
 
 def _single_policy_id(cfg: IngressConfig, profile: str | None, this_workspace_id) -> str:
@@ -425,7 +433,7 @@ def preview_blocks(policies: dict, cfg: IngressConfig, note: Note = lambda _m: N
     out = {}
     for tgt in sorted(policies, key=str):
         allow, deny = policies[tgt]["allow"], policies[tgt]["deny"]
-        if not (allow or deny or cfg.private_access):
+        if not (allow or deny or cfg.private_access or cfg.existing_public or cfg.existing_xws):
             continue
         block = _ingress_block(allow, deny, cfg, note)
         out[tgt] = {cfg.policy_mode_target: block.as_dict()}

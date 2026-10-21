@@ -111,7 +111,7 @@ flowchart TD
     G --> FEPL
     G2 --> FEPL
     G3 --> FEPL
-    FEPL["AWS/GCP: non-allow-all PAS → migrate into private_access; else copy existing private_access fwd<br/>Azure: no PrivateLink migration (ui_api default-allowed) — IP ACLs → public only"] --> H
+    FEPL["Per dimension: migrate or carry forward existing CBI block<br/>AWS/GCP: non-allow-all PAS → private_access; Azure: no PL migration<br/>existing public (if nothing to build) + cross-workspace copied forward"] --> H
     H["Existing IP ACLs auto-detected → prompt to migrate (kept with traffic rules)<br/>partner-platform IPs (Power BI / dbt) flagged + recommended<br/>+ threat-deny rules + deny-denied-IPs optional<br/>cross-workspace left in compatibility mode"] --> P["Preview proposed policy"]
     P --> EXP{"--export?"}
     EXP -->|yes| EXPW["Write JSON + Terraform"]
@@ -123,12 +123,11 @@ flowchart TD
     ACT -->|create_new| SC{"--policy-scope"}
     SC -->|per_workspace| PW["One policy per workspace: name-ws-id<br/>no pre-checks"]
     SC -->|"current / all_workspaces"| PFq{"Assigned policy safe to bind?"}
-    PFq -->|"enforced restrictive public ingress"| X3["ABORT"]
-    PFq -->|"enforced private + migrating non-allow-all PAS"| X3
+    PFq -->|"migrating public over restrictive existing public"| X3["ABORT"]
+    PFq -->|"migrating non-allow-all PAS over restrictive existing private"| X3
     PFq -->|"new id would drop enforced egress"| X3
-    PFq -->|"dry-run restrictive → warn"| WR["Warn, continue"]
-    PFq -->|"new id drops cross-workspace → warn"| WR
-    PFq -->|"clean / allow-all"| WR
+    PFq -->|"new id drops dry-run egress → warn"| WR["Warn, continue"]
+    PFq -->|"clean / carried forward"| WR
     WR --> WMODE{"--policy-mode"}
     U --> WMODE
     PW --> WMODE
@@ -372,22 +371,27 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   for the current directory), single-policy scopes only, and it works in propose-only mode.
 - **Pre-checks (create + assign).** Before creating and assigning a single policy, each command
   inspects the workspace's currently-assigned policy and aborts (or warns) rather than silently
-  clobbering it. **Ingress** aborts on an enforced restrictive public ingress. **Egress** aborts on
-  an enforced restrictive egress (warns on a dry-run one). Both also guard the *opposite* direction:
-  when creating a policy under a **new** id (which rebinds the workspace, dropping the old policy's
-  other block via the permissive default), they abort if that would drop an enforced restrictive
-  block — pointing you at `--policy-action add_to_existing --existing-policy-id <id>` to keep it. An
-  allow-all assigned policy, or updating the same id in place, is fine.
-- **Front-end PrivateLink & cross-workspace.** A PrivateLink workspace no longer aborts ingress;
-  public and private access migrate independently. On **AWS/GCP** the CLI reads the workspace's
-  Private Access Settings and migrates a **non-allow-all** PAS (specific registered endpoints) into a
-  `private_access` block (an allow-all PAS needs nothing — CBI defaults to allowing all registered
-  endpoints). On **Azure** front-end PrivateLink is not migrated at all (`databricks_ui_api` endpoints
-  are default-allowed; the public-access flag isn't retired) — Azure just migrates IP ACLs into public
-  access. On **all clouds** an existing CBI `private_access` block is **copied forward** into the new
-  policy. The preflight guards public and private independently (abort on an *enforced* restrictive
-  block in the direction being migrated; dry-run warns). Cross-workspace access is left in
-  **compatibility mode** — preserved untouched on a same-id update; a new-id rebind warns.
+  clobbering it. **Ingress** aborts, per dimension, only when a dimension it *migrates* collides with
+  a *restrictive* existing CBI block in that same dimension (migrating public over a restrictive
+  public block, or a non-allow-all PAS over a restrictive private block); other existing blocks are
+  carried forward. **Egress** aborts on an enforced restrictive egress (warns on a dry-run one). Both
+  also guard the *opposite* direction: when creating a policy under a **new** id (which rebinds the
+  workspace, dropping the old policy's egress via the permissive default), they abort if that would
+  drop an enforced restrictive egress — pointing you at `--policy-action add_to_existing
+  --existing-policy-id <id>` to keep it. An allow-all assigned policy, or updating the same id in
+  place, is fine.
+- **Front-end PrivateLink, existing CBI, & cross-workspace.** A PrivateLink workspace no longer
+  aborts ingress. Public, private and cross-workspace access are **independent dimensions**, each
+  built/migrated or **carried forward** from the workspace's existing CBI policy (restrictive blocks
+  only). **Public** is built net-new from observed traffic + IP ACLs (an existing restrictive public
+  block is preserved only when there's nothing to build). **Private**: on AWS/GCP a **non-allow-all**
+  PAS (specific registered endpoints) is migrated into `private_access` (an allow-all PAS needs
+  nothing and never loosens a stricter existing block); on Azure PrivateLink isn't migrated
+  (`databricks_ui_api` endpoints are default-allowed) — an existing CBI private block is carried
+  forward. **Cross-workspace** is always carried forward verbatim (this tool doesn't build
+  cross-workspace rules). The create-and-assign preflight aborts only when a *migrated* dimension
+  collides with a *restrictive* existing block in that same dimension. (Mirrors the
+  `databricks-migrate-ip-acls` sibling tool's existing-policy handling.)
 - Requires `databricks-sdk>=0.152.0` for the network-policy dataclasses — including the
   `private_access` / `cross_workspace_access` blocks (pinned in `pyproject.toml`).
 - **Applying a policy needs account-level auth**, which is separate from workspace auth — a workspace

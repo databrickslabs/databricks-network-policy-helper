@@ -21,9 +21,15 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
   `private_access` block (endpoint ids mapped across as-is); an allow-all PAS needs no migration (CBI
   already defaults to allowing all registered endpoints). On **Azure**, front-end PrivateLink is not
   migrated at all (the `databricks_ui_api` endpoints are default-allowed and additive, and the
-  public-access flag isn't being retired) — Azure simply migrates IP ACLs into public access. On
-  **all clouds**, an existing CBI `private_access` block on the assigned policy is **copied forward**
-  into the generated policy, so a public-access migration never disturbs private connectivity.
+  public-access flag isn't being retired) — Azure simply migrates IP ACLs into public access.
+- **Existing CBI ingress is reused/retained per dimension.** Public, private and cross-workspace
+  access are independent: each is either built/migrated or **carried forward** from the workspace's
+  currently-assigned CBI policy (deep-copied, restrictive blocks only). Public is built net-new from
+  observed traffic + IP ACLs (an existing restrictive public block is preserved only when this run
+  has nothing of its own to build); private is migrated from a non-allow-all PAS or carried forward
+  (an allow-all PAS never loosens a stricter existing private block); **cross-workspace is always
+  carried forward verbatim** (this tool doesn't build cross-workspace rules). Aligns the existing-
+  policy handling with the `databricks-migrate-ip-acls` sibling tool.
 - **Partner-platform IP detection.** Observed inbound IPs are matched against published partner
   ranges — **Power BI** (dynamic, from the Azure Service Tags `PowerBI` tag) and **dbt platform**
   (curated) — labelled as that partner and recommended for allow-listing. The CLI also points you at
@@ -38,16 +44,13 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ### Changed
 
-- **Independent public/private migration pre-checks.** The create-and-assign preflight now guards the
-  public and private directions separately: it aborts on an **enforced** restrictive public ingress
-  already on the assigned policy (dry-run warns, assigning replaces it), and — only when migrating a
-  non-allow-all PAS — aborts on an **enforced** restrictive private-access block (dry-run warns). So,
-  e.g., legacy IP ACLs plus an existing CBI private-access block no longer aborts: the ACLs move to
-  public access and the private block is carried across.
-- **Cross-workspace access is left in compatibility mode (with a heads-up).** `ingress` no longer
-  aborts when the assigned policy has cross-workspace rules. A same-id update preserves the block
-  untouched; a new-id rebind warns instead of clobbering. This tool doesn't build cross-workspace
-  rules yet (no reliable per-workspace signal in the system tables).
+- **Per-dimension create-and-assign conflict gate.** The preflight now aborts only when a dimension
+  this run **migrates** collides with a **restrictive** existing CBI block in that same dimension:
+  migrating public (observed traffic / IP ACLs) over a restrictive public block, or migrating a
+  non-allow-all PAS over a restrictive private block. (It aborts on any restrictive block — enforced
+  or dry-run.) So legacy IP ACLs plus an existing CBI private-access block no longer aborts — the
+  ACLs move to public and the private block is carried across. The egress opposite-direction guard on
+  a new-id rebind is unchanged.
 - **Minimum `databricks-sdk` is now 0.152.0** (for the `private_access` / `cross_workspace_access`
   CBI dataclasses).
 
