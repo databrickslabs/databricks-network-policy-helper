@@ -23,6 +23,12 @@ Columns: `cidr, source_feed, threat_type, confidence, source_url, loaded_at`.
 on. The loader keeps only IPs seen on **≥3** lists (`IPSUM_MIN_LISTS`), tagging **≥5** as confidence
 1 and 3–4 as confidence 2. This trims ~112k raw IPs to ~14k consensus entries.
 
+**`tor_exit` reachability:** `check.torproject.org` is frequently blocked on corporate/cloud egress
+networks (and the Tor Project rate-limits datacenter IPs), surfacing as
+`⚠️ feed fetch failed … Connection reset by peer`. The URL is still current — the feed just can't be
+reached from those networks. Safe to ignore the warning or drop `tor_exit` from `--threat-feeds`;
+the other feeds are unaffected.
+
 ### Held back (unconfirmed licensing — technically work, not enabled)
 blocklist.de, Emerging Threats `compromised-ips.txt`, dataplane.org signals. All are free/ungated
 and parse cleanly; they were left out pending explicit licensing confirmation. To add one: write a
@@ -73,7 +79,7 @@ as that partner and recommended for allow-listing (the platform, not a person, i
 |---|---|---|---|
 | Power BI | `Power BI` | the Azure Service Tags JSON (`PowerBI` + `PowerBI.<region>` tags), via `microsoft.com/.../details.aspx?id=56519` | **dynamic** — reuses the same official feed as the cloud ranges; no auth |
 | dbt platform | `dbt platform` | `docs.getdbt.com/docs/cloud/about-cloud/access-regions-ip-addresses` | **curated** in-repo (no machine feed); keep `_DBT_LAST_VERIFIED` current when refreshing |
-| Tableau Cloud | `Tableau Cloud` | — | **deferred** — ships no ranges yet, pending a confirmed published-allowlist source; the loader slot is wired up |
+| Tableau Cloud | `Tableau Cloud` | `help.tableau.com/current/pro/desktop/en-us/publish_tableau_online_ip_authorization.htm` | **curated** in-repo (Tableau Cloud Hyperforce pod ranges; no machine feed); keep `_TABLEAU_LAST_VERIFIED` current when refreshing |
 
 Databricks' own managed **"Partner platforms"** context-based-ingress source (Beta; AWS + GCP; Power
 BI / Tableau Cloud / dbt platform) maintains these lists for you and is the cleaner option. It is

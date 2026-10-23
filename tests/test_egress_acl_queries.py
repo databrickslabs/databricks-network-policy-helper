@@ -726,6 +726,50 @@ def test_plan_from_pas_endpoint_level_keeps_ids_and_name_label():
     assert plan.label == "prod-pas"  # PAS name kept verbatim as the rule label
 
 
+def _network_account(network_id="net-1", relay=None, rest=None, ws_raises=False, net_raises=False):
+    """An account whose workspace carries `network_id` and whose networks.get returns a Network with
+    vpc_endpoints.{dataplane_relay, rest_api}."""
+
+    class _WS:
+        def get(self, workspace_id):
+            if ws_raises:
+                raise RuntimeError("no perms")
+            return type("W", (), {"network_id": network_id})()
+
+    class _Networks:
+        def get(self, network_id):  # noqa: A002 - mirrors the SDK's positional arg name
+            if net_raises:
+                raise RuntimeError("no perms")
+            vpce = type("V", (), {"dataplane_relay": relay, "rest_api": rest})()
+            return type("N", (), {"vpc_endpoints": vpce})()
+
+    return type("Acct", (), {"workspaces": _WS(), "networks": _Networks()})()
+
+
+def test_backend_private_endpoint_ids_reads_relay_and_rest():
+    acct = _network_account(relay=["vpce-relay"], rest=["vpce-rest"])
+    assert acl_core.backend_private_endpoint_ids(acct, 1) == ["vpce-relay", "vpce-rest"]
+
+
+def test_backend_private_endpoint_ids_dedupes_preserving_order():
+    acct = _network_account(relay=["vpce-a", "vpce-b"], rest=["vpce-b", "vpce-c"])
+    assert acl_core.backend_private_endpoint_ids(acct, 1) == ["vpce-a", "vpce-b", "vpce-c"]
+
+
+def test_backend_private_endpoint_ids_no_network_is_empty():
+    # front-end-only PrivateLink (back-end via the compute-plane NAT gateway) → no network id
+    assert acl_core.backend_private_endpoint_ids(_network_account(network_id=None), 1) == []
+
+
+def test_backend_private_endpoint_ids_read_failure_is_empty():
+    assert acl_core.backend_private_endpoint_ids(_network_account(net_raises=True), 1) == []
+    assert acl_core.backend_private_endpoint_ids(_network_account(ws_raises=True), 1) == []
+
+
+def test_backend_private_endpoint_ids_empty_vpc_endpoints_is_empty():
+    assert acl_core.backend_private_endpoint_ids(_network_account(relay=None, rest=None), 1) == []
+
+
 def test_existing_cbi_ingress_copies_restrictive_subblocks_only():
     # existing_cbi_ingress returns deep-copied, restrictive-only (public / private / xws) sub-blocks
     # from the workspace's assigned CBI policy; permissive blocks come back as None.

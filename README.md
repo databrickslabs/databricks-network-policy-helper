@@ -112,7 +112,7 @@ flowchart TD
     G2 --> FEPL
     G3 --> FEPL
     FEPL["Per dimension: migrate or carry forward existing CBI block<br/>AWS/GCP: non-allow-all PAS → private_access; Azure: no PL migration<br/>existing public (if nothing to build) + cross-workspace copied forward"] --> H
-    H["Existing IP ACLs auto-detected → prompt to migrate (kept with traffic rules)<br/>partner-platform IPs (Power BI / dbt) flagged + recommended<br/>+ threat-deny rules + deny-denied-IPs optional<br/>cross-workspace left in compatibility mode"] --> P["Preview proposed policy"]
+    H["Existing IP ACLs auto-detected → prompt to migrate (kept with traffic rules)<br/>partner-platform IPs (Power BI / dbt / Tableau) flagged + recommended<br/>+ threat-deny rules + deny-denied-IPs optional<br/>cross-workspace left in compatibility mode"] --> P["Preview proposed policy"]
     P --> EXP{"--export?"}
     EXP -->|yes| EXPW["Write JSON + Terraform"]
     EXP -->|no| CR{"--create-policy?"}
@@ -262,6 +262,10 @@ ranges — those groups are excluded from the allow-list and surfaced for invest
 | [DShield (SANS ISC)](https://www.dshield.org/) | `dshield` | Top attacking /24 subnets. |
 | [CINS CI Army](https://cinsscore.com/#list) | `cins_ci_army` | Poorly-rated malicious IPs (gap-filler). |
 
+> `tor_exit` fetches from `check.torproject.org`, which is often blocked on corporate/cloud networks.
+> If you see `⚠️ feed fetch failed … Connection reset by peer`, the feed is simply unreachable there
+> (the URL is still current) — ignore it or deselect `tor_exit`.
+
 **Egress** (`--block-threat-domains` with `--threat-feed`) can block known-bad **domains**:
 
 | Feed | `--threat-feed` key | What it is |
@@ -386,7 +390,12 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   only). **Public** is built net-new from observed traffic + IP ACLs (an existing restrictive public
   block is preserved only when there's nothing to build). **Private**: on AWS/GCP a **non-allow-all**
   PAS (specific registered endpoints) is migrated into `private_access` (an allow-all PAS needs
-  nothing and never loosens a stricter existing block); on Azure PrivateLink isn't migrated
+  nothing and never loosens a stricter existing block). Because a `RESTRICTED_ACCESS` private block
+  gates **all** private ingress (not just the front-end), the run also reads the workspace's
+  **back-end PrivateLink** endpoints (data-plane SCC relay + REST) from its network config
+  (`network.vpc_endpoints` — AWS VPC endpoints / GCP PSC; these live in the network config, not the
+  PAS) and adds them as a second allow rule, so the restricted policy doesn't block the data plane.
+  On Azure PrivateLink isn't migrated
   (`databricks_ui_api` endpoints are default-allowed) — an existing CBI private block is carried
   forward. **Cross-workspace** is always carried forward verbatim (this tool doesn't build
   cross-workspace rules). The create-and-assign preflight aborts only when a *migrated* dimension
@@ -417,7 +426,7 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   — so you can stand up a restricted dry-run ingress policy, observe, and complete the allow-list from
   what it would have denied. Best-effort; `--no-include-inbound-network` opts out.
 - **Partner platforms.** Observed inbound IPs that fall in a known partner-platform range (Power BI,
-  dbt platform) are labelled as that partner and recommended for allow-listing. Databricks' own
+  dbt platform, Tableau Cloud) are labelled as that partner and recommended for allow-listing. Databricks' own
   managed "Partner platforms" ingress source (Beta; AWS + GCP) maintains these lists for you and is
   the cleaner option — the CLI flags it, but since the SDK can't set that source yet, matched IPs are
   emitted as labelled CIDR allow-rules.

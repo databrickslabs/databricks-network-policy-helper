@@ -155,7 +155,33 @@ def test_confirm_truncation_decline_aborts_cleanly(monkeypatch):
 def test_confirm_truncation_accept_proceeds(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
-    cli._confirm_truncation(["capped 60 rules -> 50"], yes=False)  # must not raise
+    assert cli._confirm_truncation(["capped 60 rules -> 50"], yes=False) is True  # continue
+
+
+def test_confirm_truncation_reselect_returns_false(monkeypatch):
+    import questionary
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)  # decline "continue?"
+    monkeypatch.setattr(
+        questionary, "select", lambda *a, **k: types.SimpleNamespace(ask=lambda: "reselect")
+    )
+    # allow_reselect + "go back" -> return False (caller loops back to selection), no raise
+    assert cli._confirm_truncation(["capped"], yes=False, allow_reselect=True) is False
+
+
+def test_confirm_truncation_reselect_abort_exits(monkeypatch):
+    import questionary
+    import typer
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)  # decline "continue?"
+    monkeypatch.setattr(
+        questionary, "select", lambda *a, **k: types.SimpleNamespace(ask=lambda: "abort")
+    )
+    with pytest.raises(typer.Exit) as exc:
+        cli._confirm_truncation(["capped"], yes=False, allow_reselect=True)
+    assert exc.value.exit_code == 0  # abort -> clean exit
 
 
 class _PolicyAcct:
