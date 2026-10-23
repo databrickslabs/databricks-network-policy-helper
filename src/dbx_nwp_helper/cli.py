@@ -1002,8 +1002,29 @@ def _reconcile_existing_ingress(account, workspace_id, wc, cfg: IngressConfig, y
                 "already has restrictive CBI private access — keeping the stricter existing private rules.",
             )
         else:
+            # A RESTRICTED_ACCESS (endpoint-scoped) private block gates ALL private ingress, so the
+            # workspace's back-end PrivateLink endpoints (data-plane relay + REST — in the network
+            # config, not the PAS) must be allowed too, or the data plane is blocked. (ALLOW_ALL
+            # already permits every registered endpoint, so there's nothing to add there.)
+            if plan.restriction_mode == "RESTRICTED_ACCESS":
+                plan.backend_endpoint_ids = acl_core.backend_private_endpoint_ids(account, workspace_id)
+                if plan.backend_endpoint_ids:
+                    console.banner(
+                        "info",
+                        f"Detected {len(plan.backend_endpoint_ids)} back-end PrivateLink endpoint(s) "
+                        "(data-plane relay + REST) for this workspace — including them in the policy's "
+                        "private_access so the restricted private rules don't block the data plane.",
+                    )
+                else:
+                    console.banner(
+                        "warn",
+                        "No back-end PrivateLink endpoint detected for this workspace to migrate.",
+                    )
             cfg.private_access = policy_core.build_private_access_block(
-                plan.restriction_mode, plan.endpoint_ids, plan.label
+                plan.restriction_mode,
+                plan.endpoint_ids,
+                plan.label,
+                backend_endpoint_ids=plan.backend_endpoint_ids,
             )
             console.banner(
                 "info",
@@ -1082,23 +1103,42 @@ def _interactive(yes: bool) -> bool:
     return not yes and sys.stdin.isatty()
 
 
-def _confirm_truncation(truncations: list[str], yes: bool) -> None:
+def _confirm_truncation(truncations: list[str], yes: bool, *, allow_reselect: bool = False) -> bool:
     """Decision point when rules / CIDRs / destinations were auto-capped to fit policy limits. The
     per-item warnings already printed inline during build/preview; this forces the operator to
     acknowledge that some rules were dropped before continuing to export/apply. Skipped by --yes and
-    non-interactively (scripted runs proceed). 'No' stops the run cleanly (exit 0)."""
+    non-interactively (scripted runs proceed → returns True). Returns True to continue. When
+    `allow_reselect` is set, declining the prompt offers a second choice — go back to the selection
+    step (returns False) or abort; without it (or if the user picks abort) the run stops cleanly
+    (exit 0)."""
     if not truncations or not _interactive(yes):
-        return
+        return True
     n = len(truncations)
-    if not typer.confirm(
+    if typer.confirm(
         typer.style(
             f"⚠️  {n} truncation(s) were applied to fit policy limits (see warnings above). Continue?",
             fg="yellow",
         ),
         default=False,
     ):
-        console.banner("info", "Stopped — nothing further was done.")
-        raise typer.Exit(code=0)
+        return True
+    if allow_reselect:
+        import questionary
+
+        choice = questionary.select(
+            "Some rules were trimmed to fit the policy limits. What next?",
+            choices=[
+                questionary.Choice(
+                    title="Go back to the allow-rule selection (deselect rules to get under the limit)",
+                    value="reselect",
+                ),
+                questionary.Choice(title="Abort — write nothing", value="abort"),
+            ],
+        ).ask()
+        if choice == "reselect":
+            return False
+    console.banner("info", "Stopped — nothing further was done.")
+    raise typer.Exit(code=0)
 
 
 def _reconcile_ip_acls(analysis, cfg: IngressConfig, yes: bool) -> None:
@@ -1883,22 +1923,35 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     # existing private/public/cross-workspace forward). Needs an account client → no-op without one.
     existing_ingress = _reconcile_existing_ingress(account, this_ws, wc, cfg, yes)
     # Optionally let the user cull the proposed allow rules before they're built (and before SCIM).
-    _select_ingress_rules(analysis, cfg, yes)
+    # Snapshot the full observed-traffic suggestions first: if a policy-limit truncation makes the
+    # user want to go back and re-pick, the selection screen can re-offer every rule (the picker
+    # prunes the analysis in place) rather than only the already-narrowed subset.
+    suggestions_full = analysis.suggestions.copy(deep=True)
+    suggestion_rows_full = list(analysis.suggestion_rows)
+    while True:
+        _select_ingress_rules(analysis, cfg, yes)
 
-    identity_resolution = None
-    if cfg.scope_identity:
-        with console.status("Resolving identities via account SCIM…"):
-            identity_resolution = rules.resolve_identities(
-                analysis, account, note=lambda m: console.banner("info", m)
-            )
+        identity_resolution = None
+        if cfg.scope_identity:
+            with console.status("Resolving identities via account SCIM…"):
+                identity_resolution = rules.resolve_identities(
+                    analysis, account, note=lambda m: console.banner("info", m)
+                )
 
-    policies = rules.build_rules(analysis, cfg, identity_resolution, note=lambda m: console.banner("warn", m))
-    previews = rules.preview_blocks(policies, cfg, note=lambda m: console.banner("info", m))
-    render.ingress_preview(previews, cfg, analysis)
-    if previews:
-        console.responsibility_warning("source IP addresses / CIDRs")
-        _note_cross_workspace_compat(cfg)
-    _confirm_truncation(analysis.truncations, yes)
+        policies = rules.build_rules(
+            analysis, cfg, identity_resolution, note=lambda m: console.banner("warn", m)
+        )
+        previews = rules.preview_blocks(policies, cfg, note=lambda m: console.banner("info", m))
+        render.ingress_preview(previews, cfg, analysis)
+        if previews:
+            console.responsibility_warning("source IP addresses / CIDRs")
+            _note_cross_workspace_compat(cfg)
+        if _confirm_truncation(analysis.truncations, yes, allow_reselect=True):
+            break
+        # The user chose to go back: restore the full rule set and force the picker on for the retry.
+        analysis.suggestions = suggestions_full.copy(deep=True)
+        analysis.suggestion_rows = list(suggestion_rows_full)
+        cfg.select_rules = True
 
     if cfg.export:
         if previews:

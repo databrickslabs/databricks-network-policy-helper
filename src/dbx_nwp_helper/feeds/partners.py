@@ -16,8 +16,9 @@ Sourcing:
     tag), the same official feed the cloud-provider ranges use. No auth.
   * dbt       — curated in-repo snapshot of docs.getdbt.com (no machine-readable feed exists). Keep
     `_DBT_LAST_VERIFIED` current when refreshing from the source URL.
-  * Tableau   — DEFERRED: the current published Tableau Cloud allowlist IP doc wasn't confirmed, so
-    no ranges are shipped yet. The structure below is ready to populate once the source is verified.
+  * Tableau   — curated in-repo snapshot of help.tableau.com (Tableau Cloud Hyperforce pod egress
+    ranges; no machine-readable feed, though the Salesforce-owned ip-ranges.json is a possible future
+    source). Keep `_TABLEAU_LAST_VERIFIED` current when refreshing from the source URL.
 
 Verify current licensing/terms before any customer-facing redistribution (as with the threat feeds).
 """
@@ -108,11 +109,32 @@ def _load_dbt(now) -> list[tuple]:
     return rows
 
 
-# --- Tableau Cloud (DEFERRED — source not yet confirmed) -------------------------------------------
-# Populate from the confirmed Tableau Cloud allowlist IP doc, then flip this on. Left empty so the
-# feed, enrichment, and `feeds list` all behave today and Tableau can be added without new wiring.
-_TABLEAU_SOURCE = ""  # TODO: confirm the current help.tableau.com Tableau Cloud IP-allowlist doc
-_TABLEAU_RANGES: list[tuple[str, str]] = []
+# --- Tableau Cloud (curated — help.tableau.com Hyperforce pods) ------------------------------------
+_TABLEAU_SOURCE = (
+    "https://help.tableau.com/current/pro/desktop/en-us/"
+    "publish_tableau_online_ip_authorization.htm"
+)
+_TABLEAU_LAST_VERIFIED = "2026-10-23"
+# (cidr, region-label). Hyperforce pod egress ranges only — the page's pre-Hyperforce single IPs are
+# listed there for *removal* from allowlists, so they're deliberately excluded.
+_TABLEAU_RANGES: list[tuple[str, str]] = [
+    # Asia Pacific
+    ("141.163.192.0/23", "aws ap-southeast-2 (Australia)"),
+    ("141.163.216.0/24", "aws ap-south-2 (India)"),
+    ("141.163.212.0/24", "aws ap-southeast-3 (Indonesia)"),
+    ("141.163.208.0/23", "aws ap-northeast-1 (Japan)"),
+    ("141.163.196.0/23", "aws ap-southeast-1 (Singapore)"),
+    ("141.163.200.0/23", "aws ap-northeast-2 (South Korea)"),
+    # Canada
+    ("155.226.152.0/23", "aws ca-central-1 (Canada)"),
+    # Europe
+    ("145.224.208.0/23", "aws eu-central-1 (Germany)"),
+    ("145.224.198.0/24", "aws eu-central-2 (Switzerland)"),
+    ("145.224.200.0/23", "aws eu-west-2 (UK)"),
+    # United States
+    ("155.226.128.0/21", "aws us-west-2 (US West)"),
+    ("155.226.144.0/22", "aws us-east-1 (US East)"),
+]
 
 
 def _load_tableau(now) -> list[tuple]:

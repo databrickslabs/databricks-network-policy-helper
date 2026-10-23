@@ -156,6 +156,49 @@ def test_build_private_access_restricted_without_ids_permits_nothing():
     assert not blk.get("allow_rules")
 
 
+def test_build_private_access_restricted_includes_backend_endpoints():
+    # A RESTRICTED_ACCESS private block gates ALL private ingress, so the workspace's back-end
+    # PrivateLink endpoints (relay + REST — not in the PAS) must ride alongside the front-end ones.
+    blk = policy.build_private_access_block(
+        "RESTRICTED_ACCESS", ["vpce-frontend"], label="corp-pas",
+        backend_endpoint_ids=["vpce-relay", "vpce-rest"],
+    ).as_dict()
+    rules = blk["allow_rules"]
+    assert rules[0]["label"] == "corp-pas"  # front-end verbatim
+    assert rules[0]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-frontend"]
+    assert rules[1]["label"] == "back-end PrivateLink (data-plane relay + REST)"
+    assert rules[1]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-relay", "vpce-rest"]
+
+
+def test_build_private_access_backend_deduped_against_frontend():
+    # a shared endpoint (in both the PAS and the network config) isn't listed twice
+    blk = policy.build_private_access_block(
+        "RESTRICTED_ACCESS", ["vpce-shared"], label="pas",
+        backend_endpoint_ids=["vpce-shared", "vpce-relay"],
+    ).as_dict()
+    assert blk["allow_rules"][1]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-relay"]  # shared dropped
+
+
+def test_build_private_access_allow_all_ignores_backend_endpoints():
+    # ALLOW_ALL_REGISTERED_ENDPOINTS already permits every registered endpoint — no rules added
+    blk = policy.build_private_access_block(
+        "ALLOW_ALL_REGISTERED_ENDPOINTS", backend_endpoint_ids=["vpce-relay"]
+    ).as_dict()
+    assert blk["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
+    assert not blk.get("allow_rules")
+
+
+def test_build_private_access_backend_only_when_no_frontend():
+    # endpoint-scoped PAS that allows nothing front-end, but the workspace has back-end PrivateLink:
+    # the back-end rule still rides (otherwise the restricted block would block the data plane).
+    blk = policy.build_private_access_block(
+        "RESTRICTED_ACCESS", [], label="pas", backend_endpoint_ids=["vpce-relay"]
+    ).as_dict()
+    rules = blk["allow_rules"]
+    assert len(rules) == 1
+    assert rules[0]["label"] == "back-end PrivateLink (data-plane relay + REST)"
+
+
 def test_assemble_ingress_composes_independent_sub_blocks():
     pub = policy.build_public_access_block([_allow()], [])
     priv = policy.build_private_access_block("ALLOW_ALL_REGISTERED_ENDPOINTS")

@@ -96,15 +96,26 @@ def build_deny_rule(spec: dict):
     )
 
 
+BACKEND_PRIVATE_LABEL = "back-end PrivateLink (data-plane relay + REST)"
+
+
 def build_private_access_block(
-    restriction_mode: str, endpoint_ids: list[str] | None = None, label: str = "registered-private-endpoints"
+    restriction_mode: str,
+    endpoint_ids: list[str] | None = None,
+    label: str = "registered-private-endpoints",
+    backend_endpoint_ids: list[str] | None = None,
 ):
     """A CustomerFacingIngressNetworkPolicyPrivateAccess (front-end PrivateLink) sub-block:
       * ALLOW_ALL_REGISTERED_ENDPOINTS -> the mode alone (any endpoint registered to the account);
-      * RESTRICTED_ACCESS -> one allow rule whose origin lists the given registered endpoint ids. With
-        no ids the block is RESTRICTED_ACCESS with no allow rules — faithfully, no endpoint permitted.
-    The ids are the PAS `allowed_vpc_endpoint_ids`, mapped across as-is; `label` is the PAS name
-    verbatim (see acl.plan_from_pas)."""
+      * RESTRICTED_ACCESS -> one allow rule whose origin lists the PAS front-end endpoint ids, PLUS a
+        second allow rule for the workspace's back-end PrivateLink endpoints (`backend_endpoint_ids` —
+        the data-plane SCC relay + REST, which live in the network config, not the PAS). A
+        RESTRICTED_ACCESS block gates ALL private ingress, so without the back-end endpoints it would
+        block the data plane. With no ids at all (an endpoint-scoped PAS that allows nothing, and no
+        back-end PrivateLink) the block is RESTRICTED_ACCESS with no allow rules — faithfully, no
+        endpoint permitted.
+    The front-end ids are the PAS `allowed_vpc_endpoint_ids`, mapped across as-is; `label` is the PAS
+    name verbatim (see acl.plan_from_pas)."""
     from databricks.sdk.service.settings import (  # noqa: I001
         CustomerFacingIngressNetworkPolicyEndpoints as Endpoints,
         CustomerFacingIngressNetworkPolicyPrivateAccess as PrivateAccess,
@@ -116,18 +127,24 @@ def build_private_access_block(
 
     if restriction_mode == "ALLOW_ALL_REGISTERED_ENDPOINTS":
         return PrivateAccess(restriction_mode=PrivateMode.ALLOW_ALL_REGISTERED_ENDPOINTS)
-    rules = (
-        [
-            PrivateRule(
-                label=label,
-                origin=PrivateOrigin(endpoints=Endpoints(endpoint_ids=list(endpoint_ids))),
-                destination=Destination(all_destinations=True),
-            )
-        ]
-        if endpoint_ids
-        else None
-    )
-    return PrivateAccess(restriction_mode=PrivateMode.RESTRICTED_ACCESS, allow_rules=rules)
+
+    def _rule(rule_label: str, ids: list[str]) -> PrivateRule:
+        return PrivateRule(
+            label=rule_label,
+            origin=PrivateOrigin(endpoints=Endpoints(endpoint_ids=list(ids))),
+            destination=Destination(all_destinations=True),
+        )
+
+    rules = []
+    if endpoint_ids:
+        rules.append(_rule(label, list(endpoint_ids)))
+    # Back-end endpoints aren't in the PAS; a RESTRICTED_ACCESS block built from the PAS alone would
+    # block them. Add them as a distinct, clearly-labelled rule, deduped against the front-end set.
+    front = set(endpoint_ids or [])
+    backend = [e for e in (backend_endpoint_ids or []) if e not in front]
+    if backend:
+        rules.append(_rule(BACKEND_PRIVATE_LABEL, backend))
+    return PrivateAccess(restriction_mode=PrivateMode.RESTRICTED_ACCESS, allow_rules=rules or None)
 
 
 def build_public_access_block(allow: list[dict], deny: list[dict], note: Note = lambda _m: None):

@@ -13,6 +13,38 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Back-end PrivateLink endpoints are now included in a migrated restricted private policy (AWS /
+  GCP).** When a workspace's front-end PrivateLink is endpoint-scoped, the generated `private_access`
+  block is `RESTRICTED_ACCESS` — which gates **all** private ingress, not just the front-end.
+  Previously the block was built from the Private Access Settings (front-end) alone, so the
+  workspace's back-end data-plane endpoints (SCC relay + REST) — which live in the network
+  configuration, not the PAS — were left out, and the restricted policy blocked the data plane
+  (notebook commands failing "against the workspace's ingress policy"). The ingress run now reads
+  those back-end endpoints from the workspace's network config (`network.vpc_endpoints`: AWS VPC
+  endpoints / GCP PSC) and adds them as a distinct allow rule alongside the front-end endpoints,
+  deduped. A workspace with no back-end PrivateLink migrates unchanged, with a note that none was
+  detected.
+
+### Added
+
+- **Tableau Cloud partner-platform ranges are now shipped** (previously deferred pending a confirmed
+  source). Observed inbound IPs in Tableau Cloud's published Hyperforce pod egress ranges are
+  labelled and recommended for allow-listing, matching the existing Power BI / dbt platform
+  behaviour. Curated in-repo from the Tableau Cloud IP authorization doc (`help.tableau.com`).
+
+### Changed
+
+- The policy-limit **truncation gate now offers a way back**. On interactive `ingress` runs, when
+  rules/CIDRs are auto-capped to fit account network-policy limits, declining the "continue?" prompt
+  no longer only aborts — it lets you return to the allow-rule selection (with the full rule set
+  restored so you can deselect rules to get under the limit) or abort. `--yes` / scripted runs are
+  unchanged.
+- Documented that the `tor_exit` threat feed (`check.torproject.org`) is often unreachable from
+  corporate/cloud networks — the "connection reset by peer" warning is a network block, not a
+  dead/moved feed, and is safe to ignore or deselect.
+
 ## [0.4.0] - 2026-10-21
 
 ### Added

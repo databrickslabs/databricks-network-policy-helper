@@ -160,7 +160,7 @@ def test_load_cloud_ranges_warns_when_all_feeds_unavailable(monkeypatch, capsys)
 
 
 # ------------------------------------------------------------------ partner-platform range parsing
-def test_load_partner_ranges_powerbi_dynamic_plus_dbt_curated(monkeypatch):
+def test_load_partner_ranges_powerbi_dynamic_plus_curated(monkeypatch):
     from dbx_nwp_helper.feeds import cloud, partners
 
     azure_conf = "x https://download.microsoft.com/download/a/b/ServiceTags_Public_20260101.json y"
@@ -192,15 +192,19 @@ def test_load_partner_ranges_powerbi_dynamic_plus_dbt_curated(monkeypatch):
     # dbt is curated in-repo and present regardless of the Azure fetch; bare IPs normalised to /32
     dbt = set(df[df["partner"] == "dbt platform"]["cidr"])
     assert "52.45.144.63/32" in dbt and "34.33.2.0/26" in dbt
+    # Tableau Cloud is likewise curated in-repo (Hyperforce pods), present regardless of the fetch
+    tableau = set(df[df["partner"] == "Tableau Cloud"]["cidr"])
+    assert "155.226.128.0/21" in tableau and "141.163.192.0/23" in tableau
 
 
-def test_load_partner_ranges_dbt_survives_powerbi_feed_failure(monkeypatch):
+def test_load_partner_ranges_curated_survive_powerbi_feed_failure(monkeypatch):
     from dbx_nwp_helper.feeds import cloud, partners
 
     monkeypatch.setattr(cloud, "http_get", lambda url, as_json=False: None)  # Azure feed down
     df = partners.load_partner_ranges()
     assert df[df["partner"] == "Power BI"].empty  # no Power BI ranges this run
     assert not df[df["partner"] == "dbt platform"].empty  # curated dbt ranges still present
+    assert not df[df["partner"] == "Tableau Cloud"].empty  # curated Tableau ranges still present
 
 
 # ------------------------------------------------------------------ Databricks range parsing
