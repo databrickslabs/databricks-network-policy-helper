@@ -13,6 +13,8 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-23
+
 ### Fixed
 
 - **Back-end PrivateLink endpoints are now included in a migrated restricted private policy (AWS /
@@ -165,7 +167,8 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.1.0...v0.2.0
