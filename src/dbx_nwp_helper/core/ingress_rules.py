@@ -185,7 +185,16 @@ def build_rules(
         for tgt in target_specs:
             target_specs[tgt].extend(acl_allow_specs)
 
-    deny_specs = _threat_deny_specs(analysis, cfg, note)
+    # Capture limit/cap warnings so the CLI can surface a truncation decision-point gate, while still
+    # emitting them inline via `note` exactly as before. Defined before the deny-spec build so the
+    # threat-deny CIDR-cap prioritisation (which also drops rules) is gated like the per-policy caps.
+    truncations: list[str] = []
+
+    def _limit_warn(m):
+        truncations.append(m)
+        note(m)
+
+    deny_specs = _threat_deny_specs(analysis, cfg, _limit_warn)
     for spec in acl_deny_specs + denied_deny_specs:
         deny_specs.append(spec)
 
@@ -195,14 +204,6 @@ def build_rules(
     # catch-all allow so the policy means "block these, allow the rest".
     if deny_specs and not target_specs:
         target_specs[ALL_WORKSPACES] = []
-
-    # Capture the limit-enforcement warnings so the CLI can surface a truncation decision-point gate,
-    # while still emitting them inline via `note` exactly as before.
-    truncations: list[str] = []
-
-    def _limit_warn(m):
-        truncations.append(m)
-        note(m)
 
     policies = {}
     for tgt in sorted(target_specs, key=str):
@@ -352,7 +353,9 @@ def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note
         note(
             f"Threat-intel deny list has {total:,} CIDRs (> cap {MAX_DENY_CIDRS:,}) — prioritising: "
             f"kept confidence-1, attacker_subnet first, top {MAX_DENY_CIDRS:,}. "
-            f"Including {len(selected):,} of {total:,}."
+            f"Including {len(selected):,} of {total:,}. To curate rather than truncate, use "
+            f"--threat-deny-rules matched_only (deny only CIDRs seen in your traffic) or narrow "
+            f"--threat-feeds."
         )
     else:
         selected = sorted(all_records, key=_deny_sort_key)

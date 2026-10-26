@@ -1379,6 +1379,55 @@ def test_reconcile_ip_acls_interactive_keep_all(monkeypatch):
     assert analysis.ip_acls[0]["ip_addresses"] == ["8.8.8.8", "1.1.1.1"]
 
 
+def test_reconcile_ip_acls_inventory_shows_enabled_and_disabled(capsys):
+    from dbx_nwp_helper.config import IngressConfig
+
+    cfg = IngressConfig()
+    analysis = _analysis_with_acls([_acl(label="on"), _acl(label="off", enabled=False, ips=("9.9.9.9",))])
+    cli._reconcile_ip_acls(analysis, cfg, yes=True)  # non-interactive
+    out = _sq(capsys.readouterr().out)
+    assert "enabled" in out and "disabled" in out  # full inventory with per-list status
+    assert "9.9.9.9" in out  # the disabled list's IP is shown too
+    assert cfg.migrate_ip_acls is True  # there is an enabled list to migrate
+
+
+def test_reconcile_ip_acls_non_interactive_only_disabled_not_migrated():
+    from dbx_nwp_helper.config import IngressConfig
+
+    cfg = IngressConfig()
+    cli._reconcile_ip_acls(_analysis_with_acls([_acl(enabled=False, ips=("9.9.9.9",))]), cfg, yes=True)
+    assert cfg.migrate_ip_acls is False  # only a dormant list → not auto-activated non-interactively
+
+
+def test_reconcile_ip_acls_interactive_select_disabled_activates(monkeypatch, capsys):
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr(cli, "_interactive", lambda yes: True)
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda title, choices: [c.value for c in choices])  # keep all
+    analysis = _analysis_with_acls([_acl(label="dormant", enabled=False, ips=("9.9.9.9",))])
+    cfg = IngressConfig()
+    cli._reconcile_ip_acls(analysis, cfg, yes=False)
+    assert cfg.migrate_ip_acls is True
+    assert analysis.ip_acls[0]["enabled"] is True  # selecting a disabled list activates it for migration
+    out = _sq(capsys.readouterr().out)
+    assert "DISABLED" in out and "ACTIVE" in out  # warned that dormant rules are being activated
+
+
+def test_reconcile_ip_acls_keep_enabled_only_preserves_disabled(monkeypatch):
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr(cli, "_interactive", lambda yes: True)
+    # keep only the pre-checked (enabled) entries, leaving the disabled one unselected
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda title, choices: [c.value for c in choices if c.checked])
+    analysis = _analysis_with_acls([_acl(label="on"), _acl(label="off", enabled=False, ips=("9.9.9.9",))])
+    cfg = IngressConfig()
+    cli._reconcile_ip_acls(analysis, cfg, yes=False)
+    assert cfg.migrate_ip_acls is True
+    states = {(a["label"], a["enabled"]) for a in analysis.ip_acls}
+    assert ("on", True) in states  # enabled list migrated
+    assert ("off", False) in states  # disabled list preserved, left dormant
+
+
 def test_reconcile_ip_acls_interactive_partial_selection_prunes(monkeypatch):
     from dbx_nwp_helper.config import IngressConfig
 

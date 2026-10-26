@@ -13,6 +13,28 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-26
+
+### Changed
+
+- **IP access list migration now shows the full inventory and lets you include disabled lists.** The
+  `ingress` picker lists **every** IP access list with its status (enabled / disabled) and IPs, not
+  just the enabled ones. Enabled entries are pre-checked; disabled ones are offered **unchecked** so
+  you can consciously migrate a dormant list — checking one **activates** rules that were off (and the
+  tool warns when you do). Non-interactive / `--yes` runs still migrate enabled lists only and never
+  auto-activate a disabled one.
+- **The threat-intel deny-list cap is now a decision point, not just a warning.** When the deny list
+  exceeds the 5,000-CIDR cap and gets prioritised/trimmed, it's recorded as a truncation so the
+  interactive Y/N gate covers it (as the per-policy 2,000-CIDR trim already did). The message now also
+  points at the curation levers — `--threat-deny-rules matched_only` (deny only CIDRs seen in your
+  traffic) and `--threat-feeds` — rather than a 34k-entry checkbox.
+
+### Removed
+
+- **Dropped the `--threat-feed` (singular) egress alias** added in 0.6.0 — use `--threat-feeds`
+  (consistent with `ingress`). This removes the confusing duplicate in `--help` / did-you-mean
+  suggestions.
+
 ## [0.6.0] - 2026-10-26
 
 ### Added
@@ -195,7 +217,8 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.3.0...v0.4.0
