@@ -66,7 +66,17 @@ def egress_decisions(cfg: EgressConfig) -> None:
             ("policy_scope", cfg.policy_scope, "current_workspace / per_workspace / all_workspaces."),
             ("policy_mode", cfg.policy_mode, "dry_run=log-only; enforce=blocking."),
             ("block_threat_domains", cfg.block_threat_domains, "off / matched_only / all."),
-            ("threat_feed", cfg.threat_feed, "Threat-domain feed (abuse.ch ThreatFox)."),
+            ("threat_feeds", ",".join(cfg.threat_feeds), "Domain block feeds (c2intel/threatfox/urlhaus)."),
+            (
+                "abuse_ch_auth_key",
+                "set" if cfg.abuse_ch_auth_key else "(unset)",
+                "Enables abuse.ch feeds (threatfox/urlhaus).",
+            ),
+            (
+                "domain_allowlist",
+                cfg.domain_allowlist,
+                "Flag block-candidates on a popularity/allowlist for review.",
+            ),
             (
                 "policy_name",
                 cfg.policy_name,
@@ -313,6 +323,20 @@ def egress_analysis(analysis: EgressAnalysis) -> None:
                 [{"blocked_domain": d, "observed_in_egress": d in internet} for d in analysis.blocked_domains]
             ),
             f"Threat-intel blocked domains ({len(analysis.blocked_domains)})",
+        )
+    if analysis.blocked_but_popular:
+        console.dataframe(
+            pd.DataFrame(
+                [{"domain": d, "popularity_source": src} for d, src in analysis.blocked_but_popular]
+            ),
+            f"⚠️ Block-candidates on a popularity/allowlist — REVIEW ({len(analysis.blocked_but_popular)})",
+        )
+        console.banner(
+            "warn",
+            "The domains above are on a popularity/allowlist (Tranco / MISP warninglists) yet a threat "
+            "feed flags them as bad. They are STILL in the block set — popular does not mean safe — but "
+            "verify them: a false positive here would block legitimate traffic. Remove any you trust "
+            "from the block feed or narrow with --block-threat-domains matched_only.",
         )
     if analysis.skipped_bare_s3:
         console.banner("info", f"Skipped {analysis.skipped_bare_s3} bare/path-style S3 endpoint(s).")

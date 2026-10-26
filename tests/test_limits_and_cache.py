@@ -10,7 +10,7 @@ from dbx_nwp_helper.config import (
     MAX_INGRESS_RULES_PER_POLICY,
 )
 from dbx_nwp_helper.core import limits
-from dbx_nwp_helper.core.egress import _classify, _host_hostfile
+from dbx_nwp_helper.core.egress import _classify
 from dbx_nwp_helper.feeds import cache
 
 
@@ -69,10 +69,14 @@ def test_egress_classify_strips_trailing_dot_and_case():
     assert _classify("API.OpenAI.Com.") == ("internet", {"fqdn": "api.openai.com"})
 
 
-def test_host_hostfile_parser():
-    assert _host_hostfile("0.0.0.0 evil.example.com") == "evil.example.com"
-    assert _host_hostfile("127.0.0.1 bad.test") == "bad.test"
-    assert _host_hostfile("just-one-token") == ""
+def test_clean_host_normalises_and_rejects_non_domains():
+    from dbx_nwp_helper.feeds.domains import _clean_host
+
+    assert _clean_host("Evil.Example.COM.") == "evil.example.com"  # lowercased, trailing dot stripped
+    assert _clean_host("https://bad.test/path") == "bad.test"  # host extracted from a URL
+    assert _clean_host("bad.test:8080") == "bad.test"  # port dropped
+    assert _clean_host("127.0.0.1") == ""  # IP literal is not a domain
+    assert _clean_host("just-one-token") == ""  # no dot → not a domain
 
 
 def test_cache_store_load_roundtrip_and_ttl(tmp_path, monkeypatch):

@@ -13,6 +13,34 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-26
+
+### Added
+
+- **New threat-intel feeds (security-team recommendations).** Ingress gains **C2IntelFeeds** validated
+  C2 IPs (`c2intel`) and a **dan.me.uk** Tor-exit **fallback** for when `check.torproject.org` is
+  unreachable (rate-limited, so guarded against bans). Egress domain blocking gains **C2IntelFeeds**
+  domains (`c2intel`, keyless) and the abuse.ch **URLhaus** feed (`urlhaus`).
+- **Egress domain feeds are now a selectable list.** `egress --threat-feeds` takes a comma-separated
+  set (`c2intel`,`threatfox`,`urlhaus`; `--threat-feed` kept as an alias), with a checkbox in the
+  guided wizard — mirroring the ingress `--threat-feeds` pattern. Default is the keyless set.
+- **Popularity/allowlist review (flag-only).** Before enforcing a domain block list,
+  `--domain-allowlist` (on by default) cross-checks candidates against **Tranco** and **MISP
+  warninglists** and flags any overlap for review. It never auto-unblocks — popularity is not proof a
+  domain is benign (these lists can contain real C2). Configure with `--domain-allowlist-feeds` /
+  `--no-domain-allowlist`.
+- **Opt-in abuse.ch Auth-Key.** `--abuse-ch-auth-key` (or `DBX_NWP_ABUSE_CH_AUTH_KEY`) enables the
+  abuse.ch feeds (ThreatFox / URLhaus), sent as the `Auth-Key` header. Free sign-up at
+  https://auth.abuse.ch/.
+
+### Fixed
+
+- **ThreatFox egress feed was silently dead.** abuse.ch retired its keyless bulk downloads (the old
+  `/downloads/hostfile/` now returns `410 Gone`) and moved to a free Auth-Key, so
+  `--block-threat-domains` with the default ThreatFox feed had been blocking nothing. It now loads via
+  the authenticated `/export/` endpoint when an Auth-Key is supplied (and the keyless default is now
+  `c2intel`, which works out of the box).
+
 ## [0.5.0] - 2026-10-23
 
 ### Fixed
@@ -167,7 +195,8 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.2.0...v0.3.0

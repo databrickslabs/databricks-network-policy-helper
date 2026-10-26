@@ -24,7 +24,6 @@ from ..config import (
     EgressConfig,
 )
 from ..feeds import cloud as cloud_feed
-from ..feeds.http import FEED_USER_AGENT
 from .enrich import as_list
 
 Note = Callable[[str], None]
@@ -35,8 +34,8 @@ _S3_BARE = re.compile(r"^s3[.\-](?:[a-z0-9\-]+\.)?amazonaws\.com$", re.I)
 _GCS = re.compile(r"^(?:(?P<bucket>[a-z0-9._\-]+)\.)?storage\.googleapis\.com$", re.I)
 _AZ = re.compile(r"^(?P<acct>[a-z0-9]+)\.(?P<svc>blob|dfs|file)\.core\.windows\.net$", re.I)
 
-# ThreatFox — abuse.ch botnet-C2 IOC hostfile (free, no key). Best FQDN fit for the exfil use case.
-THREAT_FEEDS = {"threatfox": "https://threatfox.abuse.ch/downloads/hostfile/"}
+# Domain block feeds + the popularity/allowlist flag are loaded (and cached) via feeds.loaders; see
+# feeds/domains.py. c2intel is keyless; threatfox/urlhaus are abuse.ch (need --abuse-ch-auth-key).
 
 # Databricks-owned domains. The egress API rejects any host in these as an internet destination
 # ("Workspace URL '…' not allowed as internet destination: `allowed_internet_destinations`") —
@@ -64,6 +63,10 @@ class EgressAnalysis:
     fqdn_ip: dict = field(default_factory=dict)
     fqdn_owner: dict = field(default_factory=dict)
     blocked_domains: list = field(default_factory=list)
+    # Block-candidate domains that also appear on a popularity/allowlist (MISP warninglists / Tranco).
+    # Flag-only: surfaced for review, NEVER auto-removed from blocked_domains — popular != benign.
+    # List of (domain, allowlist_source).
+    blocked_but_popular: list = field(default_factory=list)
     skipped_bare_s3: int = 0
     # S3 buckets dropped because a region couldn't be determined (region is required by the API for
     # AWS storage destinations). List of bucket names.
@@ -254,7 +257,7 @@ def analyze(
     _exclude_nonglobal_fqdns(analysis, fqdn_resolved_ips)
 
     if cfg.block_threat_domains != "off":
-        on_step(f"Loading threat-domain feed '{cfg.threat_feed}'…")
+        on_step(f"Loading threat-domain feed(s) {', '.join(cfg.threat_feeds)}…")
         _blocked_domains(analysis, cfg, on_step)
 
     return analysis
@@ -450,40 +453,13 @@ def _exclude_cross_cloud_storage(analysis: EgressAnalysis, cloud: str | None) ->
         analysis.skipped_cross_cloud_storage = sorted((label, name) for name, label in excluded.items())
 
 
-def _host_hostfile(line: str) -> str:
-    parts = line.split()
-    return parts[1].lower() if len(parts) == 2 else ""
-
-
-def _load_threat_domains(feed_key: str) -> set[str]:
-    from urllib.request import Request, urlopen
-
-    url = THREAT_FEEDS[feed_key]
-    domains = set()
-    try:
-        req = Request(url, headers={"User-Agent": FEED_USER_AGENT})
-        with urlopen(req, timeout=45) as resp:
-            text = resp.read().decode("utf-8", errors="replace")
-        for line in text.splitlines():
-            s = line.strip()
-            if not s or s.startswith(("#", "!", "[")):
-                continue
-            host = _host_hostfile(s)
-            if not host or "." not in host:
-                continue
-            try:
-                ipaddress.ip_address(host)  # IP literal — not a valid FQDN block target
-                continue
-            except ValueError:
-                pass
-            domains.add(host)
-    except Exception:  # noqa: BLE001
-        pass
-    return domains
-
-
 def _blocked_domains(analysis: EgressAnalysis, cfg: EgressConfig, note: Note):
-    feed = _load_threat_domains(cfg.threat_feed)
+    from ..feeds import loaders
+
+    feed_df = loaders.threat_domains(
+        cfg.threat_feeds, auth_key=cfg.abuse_ch_auth_key, refresh=cfg.refresh_feeds, note=note
+    )
+    feed = set(feed_df["domain"]) if not feed_df.empty else set()
     all_fqdns = union(analysis.targets, "internet")
     if cfg.block_threat_domains == "matched_only":
         blocked = sorted(f for f in all_fqdns if f in feed)
@@ -498,6 +474,31 @@ def _blocked_domains(analysis: EgressAnalysis, cfg: EgressConfig, note: Note):
         )
         blocked = blocked[:MAX_INTERNET_DESTINATIONS]
     analysis.blocked_domains = blocked
+    _flag_popular_block_candidates(analysis, cfg, blocked, note)
+
+
+def _flag_popular_block_candidates(analysis: EgressAnalysis, cfg: EgressConfig, blocked: list, note: Note):
+    """Flag-only safety net: mark any block-candidate that also appears on a popularity/allowlist
+    (MISP warninglists / Tranco) for review. Never removes it from the block set — popular != benign;
+    these lists can contain real C2 (per the security guidance). Off with --no-domain-allowlist."""
+    if not cfg.domain_allowlist or not blocked:
+        return
+    from ..feeds import loaders
+
+    allow_df = loaders.allowlist_domains(
+        cfg.domain_allowlist_feeds, refresh=cfg.refresh_feeds, note=note
+    )
+    if allow_df.empty:
+        return
+    source_by_domain = dict(zip(allow_df["domain"], allow_df["source"], strict=False))
+    flagged = [(d, source_by_domain[d]) for d in blocked if d in source_by_domain]
+    analysis.blocked_but_popular = flagged
+    if flagged:
+        note(
+            f"{len(flagged)} domain(s) to be blocked are also on a popularity/allowlist "
+            "(e.g. Tranco / MISP warninglists) — review before enforcing; popular does NOT mean safe, "
+            "but a false-positive block here could break legitimate traffic."
+        )
 
 
 # ------------------------------------------------------------------------------- build + apply

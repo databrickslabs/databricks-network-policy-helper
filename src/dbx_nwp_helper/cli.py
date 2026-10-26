@@ -1505,7 +1505,29 @@ def egress(
     block_threat_domains: ThreatDeny = typer.Option(
         ThreatDeny.off, help="Block known-bad domains: off/matched_only/all."
     ),
-    threat_feed: str = typer.Option("threatfox", help="Threat-domain feed."),
+    threat_feeds: str = typer.Option(
+        "c2intel",
+        "--threat-feeds",
+        "--threat-feed",
+        help="Comma-separated domain block feeds: c2intel (keyless, default), threatfox, urlhaus. "
+        "threatfox/urlhaus are abuse.ch feeds and only load when --abuse-ch-auth-key is set.",
+    ),
+    abuse_ch_auth_key: str | None = typer.Option(
+        None,
+        envvar="DBX_NWP_ABUSE_CH_AUTH_KEY",
+        help="Free abuse.ch Auth-Key (sign up at https://auth.abuse.ch/) enabling the threatfox / "
+        "urlhaus domain feeds. Also read from DBX_NWP_ABUSE_CH_AUTH_KEY.",
+    ),
+    domain_allowlist: bool = typer.Option(
+        True,
+        help="Flag (don't block) domains that are also on a popularity/allowlist (MISP warninglists "
+        "/ Tranco) for review — a safety net against blocking legitimate traffic. --no-domain-allowlist "
+        "turns the check off.",
+    ),
+    domain_allowlist_feeds: str = typer.Option(
+        "cloudflare-top1k,cisco_top1000,majestic_million,tranco",
+        help="Comma-separated popularity/allowlist sources for the --domain-allowlist review flag.",
+    ),
     select_rules: bool = typer.Option(
         True,
         help="Interactively pick which observed destinations to allow-list (a checkbox after the "
@@ -1544,6 +1566,12 @@ def egress(
     ),
 ):
     """Build (and optionally apply) a serverless egress (SEG) allow-list."""
+    from .config import DEFAULT_EGRESS_THREAT_FEEDS, DOMAIN_ALLOWLIST_FEEDS
+
+    feeds = [f.strip() for f in threat_feeds.split(",") if f.strip()] or list(DEFAULT_EGRESS_THREAT_FEEDS)
+    allow_feeds = [f.strip() for f in domain_allowlist_feeds.split(",") if f.strip()] or list(
+        DOMAIN_ALLOWLIST_FEEDS
+    )
     cfg = EgressConfig(
         lookback_days=lookback_days,
         min_events=min_events,
@@ -1555,7 +1583,10 @@ def egress(
         policy_mode=policy_mode.value,
         policy_scope=policy_scope.value,
         block_threat_domains=block_threat_domains.value,
-        threat_feed=threat_feed,
+        threat_feeds=feeds,
+        abuse_ch_auth_key=abuse_ch_auth_key,
+        domain_allowlist=domain_allowlist,
+        domain_allowlist_feeds=allow_feeds,
         select_rules=select_rules,
         apply=ApplyOptions(
             create_policy=create_policy,

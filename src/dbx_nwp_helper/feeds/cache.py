@@ -64,6 +64,20 @@ def get_or_build(
     return df
 
 
+def too_soon(marker: str, min_interval: int) -> bool:
+    """True if `marker` was last touched less than `min_interval` seconds ago — a rate-limit guard for
+    feeds that ban frequent fetches (e.g. dan.me.uk's Tor list: max once per 30 min). Checked even on
+    `--refresh-feeds`, so a forced refresh can't trip the ban. Returns False the first time (no
+    marker yet)."""
+    p = cache_dir() / f"{marker}.fetch"
+    return p.exists() and (time.time() - p.stat().st_mtime) < min_interval
+
+
+def touch(marker: str) -> None:
+    """Record that `marker` was just fetched (see `too_soon`)."""
+    (cache_dir() / f"{marker}.fetch").touch()
+
+
 def clear() -> list[str]:
     """Remove all cached feed files; return the names removed."""
     removed = []
