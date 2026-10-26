@@ -1142,36 +1142,42 @@ def _confirm_truncation(truncations: list[str], yes: bool, *, allow_reselect: bo
 
 
 def _reconcile_ip_acls(analysis, cfg: IngressConfig, yes: bool) -> None:
-    """Detect the workspace's *enabled* IP access list entries and decide which to fold into the CBI
-    policy (alongside the enriched observed-traffic rules). The detected entries are shown with their
-    actual IPs. Interactive runs get a pre-checked checkbox to curate exactly which IPs to migrate;
-    --yes / non-interactive runs migrate them all (the safe default — the CBI policy is meant to
-    replace the ACL, so dropping it silently could lose coverage). Prunes analysis.ip_acls to the
-    selection and sets cfg.migrate_ip_acls. No-op when the workspace has no enabled IP access lists."""
+    """Detect the workspace's IP access lists and decide which to fold into the CBI policy (alongside
+    the enriched observed-traffic rules). Both **enabled and disabled** lists are shown with their
+    status and actual IPs. Interactive runs get a checkbox — enabled entries pre-checked, disabled
+    ones offered unchecked so you can consciously migrate a dormant list (checking one ACTIVATES rules
+    that were off). --yes / non-interactive runs migrate all *enabled* lists (the safe default — the
+    CBI policy replaces the ACL, so dropping it silently could lose coverage) and never auto-activate
+    disabled ones. Prunes analysis.ip_acls to the selection and sets cfg.migrate_ip_acls. No-op when
+    the workspace has no IP access list entries."""
     all_acls = list(analysis.ip_acls or [])
     enabled = [a for a in all_acls if a.get("enabled")]
-    disabled = [a for a in all_acls if not a.get("enabled")]
-    entries = [(a, ip) for a in enabled for ip in a["ip_addresses"]]
+    entries = [(a, ip) for a in all_acls for ip in a["ip_addresses"]]
     if not entries:
-        cfg.migrate_ip_acls = False  # nothing enabled with any IPs; keep the preview/echo honest
+        cfg.migrate_ip_acls = False  # no lists with any IPs; keep the preview/echo honest
         return
 
-    # Show the detected lists with their actual IPs (not just a count).
+    def _status(a):
+        return "enabled" if a.get("enabled") else "disabled"
+
+    # Show the full inventory — enabled AND disabled — with status + actual IPs.
     listing = "\n".join(
-        f"    • {a['label']} ({a['list_type'] or '?'}): {', '.join(a['ip_addresses'])}" for a in enabled
+        f"    • {a['label']} ({a['list_type'] or '?'} · {_status(a)}): {', '.join(a['ip_addresses'])}"
+        for a in all_acls
     )
+    n_disabled = len(all_acls) - len(enabled)
     console.banner(
         "info",
-        f"Detected {len(enabled)} enabled IP access list(s) ({len(entries)} entr"
-        f"{'y' if len(entries) == 1 else 'ies'}) on this workspace:\n{listing}",
+        f"Detected {len(all_acls)} IP access list(s) — {len(enabled)} enabled, {n_disabled} disabled "
+        f"({len(entries)} entr{'y' if len(entries) == 1 else 'ies'}) on this workspace:\n{listing}",
     )
 
     if not _interactive(yes):
-        cfg.migrate_ip_acls = True
+        cfg.migrate_ip_acls = bool(enabled)
         console.banner(
             "info",
-            "Non-interactive run — folding all of these IP access list entries into the CBI policy "
-            "(use the interactive mode to choose a subset, or disable a list to leave it out).",
+            "Non-interactive run — folding all ENABLED IP access list entries into the CBI policy "
+            "(disabled lists are left dormant; use interactive mode to include one or pick a subset).",
         )
         return
 
@@ -1179,28 +1185,42 @@ def _reconcile_ip_acls(analysis, cfg: IngressConfig, yes: bool) -> None:
 
     choices = [
         questionary.Choice(
-            title=f"{ip}  [{a['label']} · {a['list_type'] or '?'}]", value=(id(a), ip), checked=True
+            title=f"{ip}  [{a['label']} · {a['list_type'] or '?'} · {_status(a)}]",
+            value=(id(a), ip),
+            checked=bool(a.get("enabled")),  # enabled pre-checked; disabled offered unchecked
         )
         for a, ip in entries
     ]
     kept = _checkbox_keep(
-        "Select the IP access list entries to migrate into the policy (space=toggle, enter=confirm):",
+        "Select IP access list entries to migrate (enabled pre-checked; checking a disabled one "
+        "ACTIVATES it) — space=toggle, enter=confirm:",
         choices,
     )
     if kept is None:
         console.banner("info", "Selection cancelled — aborting, nothing written.")
         raise typer.Exit(code=0)
     kept_keys = set(kept)
-    pruned = []
-    for a in enabled:
+    migrated, preserved, activated = [], [], []
+    for a in all_acls:
         keep_ips = [ip for ip in a["ip_addresses"] if (id(a), ip) in kept_keys]
         if keep_ips:
-            pruned.append({**a, "ip_addresses": keep_ips})
-    # Disabled lists aren't migrated (build_rules skips them) but stay in the analysis untouched.
-    analysis.ip_acls = pruned + disabled
-    cfg.migrate_ip_acls = bool(pruned)
-    if pruned:
-        kept_n = sum(len(a["ip_addresses"]) for a in pruned)
+            # Selected → migrate. Mark enabled so _acl_specs includes it even if the list was dormant
+            # (the user explicitly opted to activate these previously-off rules).
+            migrated.append({**a, "ip_addresses": keep_ips, "enabled": True})
+            if not a.get("enabled"):
+                activated.append(a["label"])
+        elif not a.get("enabled"):
+            preserved.append(a)  # unselected dormant list — kept in the analysis, not migrated
+    analysis.ip_acls = migrated + preserved
+    cfg.migrate_ip_acls = bool(migrated)
+    if activated:
+        console.banner(
+            "warn",
+            f"Migrating {len(activated)} previously-DISABLED IP access list(s) — these were not "
+            f"enforced on the workspace and will become ACTIVE in the new policy: {', '.join(activated)}.",
+        )
+    if migrated:
+        kept_n = sum(len(a["ip_addresses"]) for a in migrated)
         console.banner(
             "info", f"Including {kept_n} IP access list entr{'y' if kept_n == 1 else 'ies'} in the policy."
         )
@@ -1507,8 +1527,6 @@ def egress(
     ),
     threat_feeds: str = typer.Option(
         "c2intel",
-        "--threat-feeds",
-        "--threat-feed",
         help="Comma-separated domain block feeds: c2intel (keyless, default), threatfox, urlhaus. "
         "threatfox/urlhaus are abuse.ch feeds and only load when --abuse-ch-auth-key is set.",
     ),

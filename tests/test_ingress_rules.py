@@ -488,6 +488,10 @@ def test_threat_deny_caps_and_prioritises(monkeypatch):
     assert "1.0.0.0/24" in cidrs  # attacker_subnet ranks first
     assert "4.0.0.0/24" not in cidrs  # confidence-2 excluded by the cap
     assert any("cap" in n for n in notes)
+    # The cap prioritisation is also recorded as a truncation, so the CLI gates it with a Y/N
+    # decision point (not just a pass-through warning), and points at the matched_only curation lever.
+    assert any("cap" in t for t in a.truncations)
+    assert any("matched_only" in n for n in notes)
 
 
 def test_denied_specs_skips_ipv6():
