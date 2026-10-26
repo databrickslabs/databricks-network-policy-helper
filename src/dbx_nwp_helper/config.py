@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 # --- Enumerated choice sets (shared by CLI flags + guided prompts) ---
-THREAT_FEEDS = ["spamhaus_drop", "tor_exit", "firehol_level1", "ipsum", "dshield", "cins_ci_army"]
+THREAT_FEEDS = ["spamhaus_drop", "tor_exit", "firehol_level1", "ipsum", "dshield", "cins_ci_army", "c2intel"]
 POLICY_FRAMINGS = ["minimal", "optimal", "maximum"]
 SCOPING_MODES = ["ip_only", "ip_and_destination", "ip_and_identity", "ip_identity_and_destination"]
 POLICY_SCOPES = ["current_workspace", "per_workspace", "all_workspaces"]
@@ -18,7 +18,14 @@ POLICY_MODES = ["dry_run", "enforce"]
 THREAT_DENY_RULES = ["off", "matched_only", "all"]
 POLICY_ACTIONS = ["create_new", "add_to_existing"]
 BLOCK_THREAT_DOMAINS = ["off", "matched_only", "all"]
-EGRESS_THREAT_FEEDS = ["threatfox"]
+# Egress domain block feeds. `c2intel` is keyless (on by default); `threatfox`/`urlhaus` are abuse.ch
+# feeds that need a free Auth-Key (https://auth.abuse.ch/) and only activate when one is supplied.
+EGRESS_THREAT_FEEDS = ["c2intel", "threatfox", "urlhaus"]
+DEFAULT_EGRESS_THREAT_FEEDS = ["c2intel"]
+ABUSE_CH_FEEDS = {"threatfox", "urlhaus"}  # require --abuse-ch-auth-key / DBX_NWP_ABUSE_CH_AUTH_KEY
+# Popularity / allowlist sources used (flag-only) to surface block-candidates that are likely legit.
+# A hit never auto-unblocks a domain — popular != benign (these lists can include real C2).
+DOMAIN_ALLOWLIST_FEEDS = ["cloudflare-top1k", "cisco_top1000", "majestic_million", "tranco"]
 
 DEFAULT_ACCOUNT_HOST = "https://accounts.cloud.databricks.com"
 DEFAULT_NAME_PREFIX = "dbx-nwp"
@@ -153,7 +160,16 @@ class EgressConfig:
     policy_mode: str = "dry_run"
     policy_scope: str = "current_workspace"
     block_threat_domains: str = "off"
-    threat_feed: str = "threatfox"
+    # Domain block feeds to union (EGRESS_THREAT_FEEDS). Default is the keyless set; abuse.ch feeds
+    # (threatfox/urlhaus) are only loaded when abuse_ch_auth_key is set.
+    threat_feeds: list[str] = field(default_factory=lambda: list(DEFAULT_EGRESS_THREAT_FEEDS))
+    # Free abuse.ch Auth-Key (from --abuse-ch-auth-key or DBX_NWP_ABUSE_CH_AUTH_KEY). None → the
+    # abuse.ch feeds are skipped with a note; the keyless feeds still load.
+    abuse_ch_auth_key: str | None = None
+    # Flag (don't block) domains that are also on a popularity/allowlist, for review. On by default
+    # whenever blocking; `--no-domain-allowlist` turns the check off entirely.
+    domain_allowlist: bool = True
+    domain_allowlist_feeds: list[str] = field(default_factory=lambda: list(DOMAIN_ALLOWLIST_FEEDS))
     # Interactively pick which observed destinations to allow-list (checkbox). On by default in
     # interactive runs; skipped under --yes / non-interactive or with --no-select-rules.
     select_rules: bool = True

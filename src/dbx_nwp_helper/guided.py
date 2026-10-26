@@ -16,6 +16,9 @@ import questionary
 from . import console
 from .config import (
     BLOCK_THREAT_DOMAINS,
+    DEFAULT_EGRESS_THREAT_FEEDS,
+    DOMAIN_ALLOWLIST_FEEDS,
+    EGRESS_THREAT_FEEDS,
     POLICY_FRAMINGS,
     POLICY_MODES,
     POLICY_SCOPES,
@@ -144,6 +147,29 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
     scope = _select("Policy scope?", POLICY_SCOPES, default="current_workspace")
     enable_rdap = _confirm("Look up the cloud owner of internet FQDNs?", True)
     block = _select("Block known-bad domains from a threat feed?", BLOCK_THREAT_DOMAINS, default="off")
+    feeds = list(DEFAULT_EGRESS_THREAT_FEEDS)
+    auth_key = None
+    allowlist = True
+    if block != "off":
+        feeds = (
+            questionary.checkbox(
+                "Select domain block feeds (threatfox/urlhaus need an abuse.ch Auth-Key):",
+                choices=[
+                    questionary.Choice(f, checked=f in DEFAULT_EGRESS_THREAT_FEEDS)
+                    for f in EGRESS_THREAT_FEEDS
+                ],
+                style=_STYLE,
+            ).ask()
+            or list(DEFAULT_EGRESS_THREAT_FEEDS)
+        )
+        if any(f in ("threatfox", "urlhaus") for f in feeds):
+            auth_key = (
+                _text("abuse.ch Auth-Key (blank to skip those feeds; sign up at auth.abuse.ch)") or None
+            )
+        allowlist = _confirm(
+            "Flag block-candidates that are also on a popularity/allowlist (Tranco/MISP) for review?",
+            True,
+        )
 
     apply = _apply_wizard(conn, scope, other="ingress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
@@ -157,6 +183,10 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
         policy_scope=scope,
         policy_mode=mode,
         block_threat_domains=block,
+        threat_feeds=feeds,
+        abuse_ch_auth_key=auth_key,
+        domain_allowlist=allowlist,
+        domain_allowlist_feeds=list(DOMAIN_ALLOWLIST_FEEDS),
         apply=apply,
     )
 

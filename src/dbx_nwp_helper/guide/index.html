@@ -419,7 +419,7 @@ uv run dbx-nwp-helper --help</pre>
     <li id="eg-analyse">
       <h3>Analyse outbound traffic &amp; classify</h3>
       <p>It reads the observed destinations and classifies them into <strong>storage</strong> (S3 / GCS / Azure) and <strong>internet FQDNs</strong>, looking up the cloud owner of each FQDN for context.</p>
-      <details><summary>Learn more — blocking known-bad domains</summary><div class="body">The allow-list itself is what stops exfiltration. As a secondary layer, <code class="inline">--block-threat-domains matched_only|all</code> adds known-bad domains (from the <code class="inline">--threat-feed</code>, default abuse.ch ThreatFox) to the policy's block-list. It only catches <em>known</em> bad domains, so treat it as defence-in-depth, not the primary control.</div></details>
+      <details><summary>Learn more — blocking known-bad domains</summary><div class="body">The allow-list itself is what stops exfiltration. As a secondary layer, <code class="inline">--block-threat-domains matched_only|all</code> adds known-bad domains (from <code class="inline">--threat-feeds</code>: <code class="inline">c2intel</code> keyless by default, plus abuse.ch <code class="inline">threatfox</code>/<code class="inline">urlhaus</code> when an <code class="inline">--abuse-ch-auth-key</code> is set) to the policy's block-list. Before enforcing, <code class="inline">--domain-allowlist</code> flags any block-candidate that's also on a popularity/allowlist (Tranco / MISP warninglists) for review — it never auto-unblocks, because popular ≠ benign. It only catches <em>known</em> bad domains, so treat it as defence-in-depth, not the primary control.</div></details>
     </li>
     <li id="eg-select">
       <h3>Select which destinations to allow-list</h3>
@@ -508,7 +508,9 @@ uv run dbx-nwp-helper --help</pre>
   <div class="opts">
     <div class="opt"><code class="flag">--source-type-filter &lt;type&gt;</code><span class="chip">default: all</span><p>Restrict analysis to one <code class="inline">network_source_type</code> (blank = all source types).</p></div>
     <div class="opt"><code class="flag">--block-threat-domains &lt;mode&gt;</code><span class="chip">default: off</span><p>Add known-bad domains to the policy's block-list: <span class="choices">off</span>, <span class="choices">matched_only</span> (only those seen in your traffic), or <span class="choices">all</span>.</p></div>
-    <div class="opt"><code class="flag">--threat-feed &lt;name&gt;</code><span class="chip">default: threatfox</span><p>Which threat-domain feed to use for <code class="inline">--block-threat-domains</code>.</p></div>
+    <div class="opt"><code class="flag">--threat-feeds &lt;a,b,c&gt;</code><span class="chip">default: c2intel</span><p>Comma-separated domain block feeds for <code class="inline">--block-threat-domains</code>: <span class="choices">c2intel</span> (keyless), <span class="choices">threatfox</span>, <span class="choices">urlhaus</span> (abuse.ch — need an Auth-Key).</p></div>
+    <div class="opt"><code class="flag">--abuse-ch-auth-key &lt;key&gt;</code><span class="chip">env: DBX_NWP_ABUSE_CH_AUTH_KEY</span><p>Free abuse.ch Auth-Key (<a href="https://auth.abuse.ch/">auth.abuse.ch</a>) enabling the <code class="inline">threatfox</code> / <code class="inline">urlhaus</code> feeds. Without it they're skipped.</p></div>
+    <div class="opt"><code class="flag">--domain-allowlist / --no-domain-allowlist</code><span class="chip">default: on</span><p>Flag (don't block) domains also on a popularity/allowlist (Tranco / MISP warninglists) for review — a safety net against blocking legitimate traffic. Never auto-unblocks.</p></div>
   </div></details>
 
   <details class="optgroup"><summary><code class="inline">guided</code>, <code class="inline">guide</code>, <code class="inline">feeds</code> &amp; global</summary>

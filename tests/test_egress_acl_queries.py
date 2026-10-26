@@ -517,8 +517,13 @@ def test_egress_blocked_domains_matched_only(monkeypatch):
         ]
     )
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
-    monkeypatch.setattr(eg, "_load_threat_domains", lambda feed: {"evil.example.com", "other.bad"})
-    cfg = EgressConfig(enable_rdap=False, block_threat_domains="matched_only")
+    monkeypatch.setattr(
+        "dbx_nwp_helper.feeds.loaders.threat_domains",
+        lambda *a, **k: pd.DataFrame(
+            {"domain": ["evil.example.com", "other.bad"], "source": ["c2intel", "c2intel"]}
+        ),
+    )
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="matched_only", domain_allowlist=False)
     a = eg.analyze(cfg, sql_conn=None)
     # only the observed FQDN that is on the feed is blocked
     assert a.blocked_domains == ["evil.example.com"]
@@ -1128,48 +1133,48 @@ def test_analyze_drops_s3_bucket_when_region_unknown(monkeypatch):
 
 
 # ----------------------------------------------------------------- threat-domain block list
+def _block_df(domains):
+    return pd.DataFrame({"domain": list(domains), "source": ["c2intel"] * len(domains)})
+
+
 def test_blocked_domains_all_mode_uses_whole_feed(monkeypatch):
-    monkeypatch.setattr(eg, "_load_threat_domains", lambda feed: {"evil.com", "bad.net"})
+    monkeypatch.setattr(
+        "dbx_nwp_helper.feeds.loaders.threat_domains", lambda *a, **k: _block_df(["evil.com", "bad.net"])
+    )
     a = eg.EgressAnalysis(observed=pd.DataFrame(), targets={eg.ALL_WORKSPACES: eg._new_target()})
-    eg._blocked_domains(a, EgressConfig(block_threat_domains="all", threat_feed="threatfox"), lambda _m: None)
+    eg._blocked_domains(a, EgressConfig(block_threat_domains="all", domain_allowlist=False), lambda _m: None)
     assert set(a.blocked_domains) == {"bad.net", "evil.com"}  # sorted, whole feed
 
 
 def test_blocked_domains_capped_at_limit(monkeypatch):
     from dbx_nwp_helper.config import MAX_INTERNET_DESTINATIONS
 
-    feed = {f"d{i}.example" for i in range(MAX_INTERNET_DESTINATIONS + 5)}
-    monkeypatch.setattr(eg, "_load_threat_domains", lambda feed_key: feed)
+    feed = [f"d{i}.example" for i in range(MAX_INTERNET_DESTINATIONS + 5)]
+    monkeypatch.setattr("dbx_nwp_helper.feeds.loaders.threat_domains", lambda *a, **k: _block_df(feed))
     a = eg.EgressAnalysis(observed=pd.DataFrame(), targets={eg.ALL_WORKSPACES: eg._new_target()})
     notes = []
-    eg._blocked_domains(a, EgressConfig(block_threat_domains="all"), lambda m: notes.append(m))
+    eg._blocked_domains(
+        a, EgressConfig(block_threat_domains="all", domain_allowlist=False), lambda m: notes.append(m)
+    )
     assert len(a.blocked_domains) == MAX_INTERNET_DESTINATIONS
     assert any("limit" in n for n in notes)  # operator warned about the truncation
 
 
-def test_load_threat_domains_parses_hostfile(monkeypatch):
-    text = "\n".join(
-        [
-            "# comment",
-            "! banner",
-            "127.0.0.1 evil.example.com",
-            "0.0.0.0 bad.test",
-            "1.2.3.4",
-            "0.0.0.0 5.5.5.5",
-        ]
+def test_blocked_domains_flags_popular_without_removing(monkeypatch):
+    # A block-candidate that is also on a popularity/allowlist is FLAGGED for review but stays blocked.
+    monkeypatch.setattr(
+        "dbx_nwp_helper.feeds.loaders.threat_domains",
+        lambda *a, **k: _block_df(["evil.com", "cloudflare.com"]),
     )
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return text.encode()
-
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=45: _Resp())
-    domains = eg._load_threat_domains("threatfox")
-    assert "evil.example.com" in domains and "bad.test" in domains
-    assert "5.5.5.5" not in domains  # IP literal is not a valid FQDN block target
+    monkeypatch.setattr(
+        "dbx_nwp_helper.feeds.loaders.allowlist_domains",
+        lambda *a, **k: pd.DataFrame({"domain": ["cloudflare.com"], "source": ["tranco"]}),
+    )
+    a = eg.EgressAnalysis(observed=pd.DataFrame(), targets={eg.ALL_WORKSPACES: eg._new_target()})
+    notes = []
+    eg._blocked_domains(
+        a, EgressConfig(block_threat_domains="all", domain_allowlist=True), lambda m: notes.append(m)
+    )
+    assert set(a.blocked_domains) == {"cloudflare.com", "evil.com"}  # NOT removed — popular != benign
+    assert a.blocked_but_popular == [("cloudflare.com", "tranco")]  # flagged for review
+    assert any("popularity" in n or "popular" in n for n in notes)

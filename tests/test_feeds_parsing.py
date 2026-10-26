@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from dbx_nwp_helper.feeds import http, threat, util
+from dbx_nwp_helper.feeds import domains, http, threat, util
 
 NOW = datetime.now(timezone.utc)
 
@@ -103,6 +103,90 @@ def test_all_loaders_registered():
     from dbx_nwp_helper.config import THREAT_FEEDS
 
     assert set(THREAT_FEEDS) == set(threat.THREAT_FEED_LOADERS)
+
+
+def test_c2intel_ips_parses_csv(monkeypatch):
+    _patch_http(monkeypatch, "#ip,ioc\n1.1.1.1,Cobalt Strike C2\n\nbad-not-ip\n2.2.2.2,x\n")
+    cidrs = {r[0] for r in threat._feed_c2intel_ips(NOW)}
+    assert cidrs == {"1.1.1.1/32", "2.2.2.2/32"}  # header + junk line skipped
+
+
+def test_tor_exit_falls_back_to_danme_when_primary_unreachable(monkeypatch):
+    from dbx_nwp_helper.feeds import cache
+
+    # Primary (torproject) unreachable → fall back to dan.me.uk; the marker is touched BEFORE the fetch.
+    monkeypatch.setattr(threat, "http_get", lambda url, **k: "7.7.7.7\n" if "dan.me.uk" in url else None)
+    monkeypatch.setattr(cache, "too_soon", lambda *a, **k: False)
+    touched = []
+    monkeypatch.setattr(cache, "touch", lambda name: touched.append(name))
+    cidrs = {r[0] for r in threat._feed_tor_exit(NOW)}
+    assert cidrs == {"7.7.7.7/32"}
+    assert touched == ["tor_danme"]
+
+
+def test_tor_exit_fallback_skipped_when_rate_limited(monkeypatch):
+    from dbx_nwp_helper.feeds import cache
+
+    monkeypatch.setattr(threat, "http_get", lambda url, **k: None)  # primary unreachable
+    monkeypatch.setattr(cache, "too_soon", lambda *a, **k: True)  # dan.me.uk fetched <30 min ago
+    assert threat._feed_tor_exit(NOW) == []  # skipped rather than risk a ban
+
+
+def test_load_block_domains_c2intel_keyless_and_abusech_gated(monkeypatch):
+    def fake_get(url, as_json=False, headers=None):
+        return "#domain,ioc\nevil.example.com,CS\n5.5.5.5,ip-literal\n" if "C2IntelFeeds" in url else None
+
+    monkeypatch.setattr(domains, "http_get", fake_get)
+    notes = []
+    df = domains.load_block_domains(["c2intel", "threatfox"], auth_key=None, note=notes.append)
+    assert set(df["domain"]) == {"evil.example.com"}  # IP literal dropped; threatfox skipped (no key)
+    assert any("Auth-Key" in n for n in notes)
+
+
+def test_load_block_domains_threatfox_api_with_key(monkeypatch):
+    seen = {}
+
+    def fake_post(url, body, headers=None):
+        seen["headers"] = headers
+        seen["body"] = body
+        return {
+            "query_status": "ok",
+            "data": [
+                {"ioc_type": "domain", "ioc": "bad.example.com"},
+                {"ioc_type": "url", "ioc": "http://evil.test/path"},
+                {"ioc_type": "ip:port", "ioc": "1.2.3.4:443"},  # dropped (not a domain)
+            ],
+        }
+
+    monkeypatch.setattr(domains, "http_post_json", fake_post)
+    df = domains.load_block_domains(["threatfox"], auth_key="KEY")
+    assert set(df["domain"]) == {"bad.example.com", "evil.test"}  # domain + url-host; ip:port dropped
+    assert seen["headers"]["Auth-Key"] == "KEY"
+    assert seen["body"]["query"] == "get_iocs"
+
+
+def test_load_block_domains_urlhaus_api_with_key(monkeypatch):
+    def fake_get(url, as_json=False, headers=None):
+        assert headers["Auth-Key"] == "KEY"
+        return {"query_status": "ok", "urls": [{"url": "http://1.2.3.4/x"}, {"url": "https://mal.test/a"}]}
+
+    monkeypatch.setattr(domains, "http_get", fake_get)
+    df = domains.load_block_domains(["urlhaus"], auth_key="KEY")
+    assert set(df["domain"]) == {"mal.test"}  # IP-host url dropped, domain-host kept
+
+
+def test_load_allowlist_domains_misp_and_tranco(monkeypatch):
+    monkeypatch.setattr(
+        domains,
+        "http_get",
+        lambda url, as_json=False, headers=None: {"list": ["cloudflare.com", "Example.COM."]},
+    )
+    monkeypatch.setattr(
+        domains, "http_get_zip_member", lambda url, suffix=".csv": "1,google.com\n2,bad-no-dot,\n"
+    )
+    df = domains.load_allowlist_domains(["cloudflare-top1k", "tranco"])
+    got = set(df["domain"])
+    assert {"cloudflare.com", "example.com", "google.com"} <= got  # MISP + normalised + Tranco
 
 
 # ---------------------------------------------------------------- cloud-provider range parsing
