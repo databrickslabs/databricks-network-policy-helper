@@ -163,11 +163,11 @@ class EgressConfig:
     # Domain block feeds to union (EGRESS_THREAT_FEEDS). Default is the keyless set; abuse.ch feeds
     # (threatfox/urlhaus) are only loaded when abuse_ch_auth_key is set.
     threat_feeds: list[str] = field(default_factory=lambda: list(DEFAULT_EGRESS_THREAT_FEEDS))
-    # Free abuse.ch Auth-Key (from --abuse-ch-auth-key or DBX_NWP_ABUSE_CH_AUTH_KEY). None → the
+    # Free abuse.ch Auth-Key (prompted interactively, or DBX_NWP_ABUSE_CH_AUTH_KEY). None → the
     # abuse.ch feeds are skipped with a note; the keyless feeds still load.
     abuse_ch_auth_key: str | None = None
     # Flag (don't block) domains that are also on a popularity/allowlist, for review. On by default
-    # whenever blocking; `--no-domain-allowlist` turns the check off entirely.
+    # whenever blocking; the interactive run offers to turn it off.
     domain_allowlist: bool = True
     domain_allowlist_feeds: list[str] = field(default_factory=lambda: list(DOMAIN_ALLOWLIST_FEEDS))
     # Interactively pick which observed destinations to allow-list (checkbox). On by default in

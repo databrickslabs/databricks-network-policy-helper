@@ -529,6 +529,64 @@ def test_egress_blocked_domains_matched_only(monkeypatch):
     assert a.blocked_domains == ["evil.example.com"]
 
 
+def _analysis_with_internet(fqdns: dict) -> eg.EgressAnalysis:
+    return eg.EgressAnalysis(
+        observed=pd.DataFrame(),
+        targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {}, "internet": fqdns}},
+    )
+
+
+def test_blocked_domains_prioritise_matched_then_feed_over_cap(monkeypatch):
+    # Over the cap, keep the highest-signal domains: traffic-matched first, then higher-severity feeds
+    # (c2intel > urlhaus) — NOT the alphabetically-first ones.
+    monkeypatch.setattr(eg, "MAX_INTERNET_DESTINATIONS", 2)
+    monkeypatch.setattr(
+        "dbx_nwp_helper.feeds.loaders.threat_domains",
+        lambda *a, **k: pd.DataFrame(
+            {
+                "domain": ["aaa.unmatched.url", "zzz.matched.url", "mmm.unmatched.c2"],
+                "source": ["urlhaus", "urlhaus", "c2intel"],
+            }
+        ),
+    )
+    a = _analysis_with_internet({"zzz.matched.url": 3})  # only this one is in observed traffic
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="all", domain_allowlist=False)
+    notes = []
+    eg._blocked_domains(a, cfg, notes.append)
+    # matched beats the alphabetically-first unmatched; the kept unmatched slot goes to c2intel (higher
+    # severity) over urlhaus — so the arbitrary alphabetical "aaa" is dropped.
+    assert a.blocked_domains == ["zzz.matched.url", "mmm.unmatched.c2"]
+    assert any("prioritising" in n for n in notes)
+
+
+def test_blocked_domains_deprioritise_popular_under_cap(monkeypatch):
+    # Among otherwise-equal candidates, a popularity-allowlisted domain is dropped first (riskiest to
+    # block) — and it's still surfaced in blocked_but_popular for review when it survives.
+    monkeypatch.setattr(eg, "MAX_INTERNET_DESTINATIONS", 1)
+    monkeypatch.setattr(
+        "dbx_nwp_helper.feeds.loaders.threat_domains",
+        lambda *a, **k: pd.DataFrame(
+            {"domain": ["popular.example", "obscure.example"], "source": ["c2intel", "c2intel"]}
+        ),
+    )
+    monkeypatch.setattr(
+        "dbx_nwp_helper.feeds.loaders.allowlist_domains",
+        lambda *a, **k: pd.DataFrame({"domain": ["popular.example"], "source": ["tranco"]}),
+    )
+    a = _analysis_with_internet({})  # neither matched → popularity is the tiebreak
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="all", domain_allowlist=True)
+    eg._blocked_domains(a, cfg, lambda _m: None)
+    assert a.blocked_domains == ["obscure.example"]  # popular one dropped first under the cap
+
+
+def test_blocked_domains_empty_feed_blocks_nothing(monkeypatch):
+    monkeypatch.setattr("dbx_nwp_helper.feeds.loaders.threat_domains", lambda *a, **k: pd.DataFrame())
+    a = _analysis_with_internet({"whatever.example": 1})
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="all", domain_allowlist=False)
+    eg._blocked_domains(a, cfg, lambda _m: None)
+    assert a.blocked_domains == []
+
+
 def test_egress_warns_and_caps_over_internet_limit():
     # >100 internet FQDNs must be capped to the limit AND the operator warned (silent truncation
     # would block the dropped destinations in enforce mode).

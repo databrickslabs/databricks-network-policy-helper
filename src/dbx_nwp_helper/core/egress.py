@@ -35,7 +35,9 @@ _GCS = re.compile(r"^(?:(?P<bucket>[a-z0-9._\-]+)\.)?storage\.googleapis\.com$",
 _AZ = re.compile(r"^(?P<acct>[a-z0-9]+)\.(?P<svc>blob|dfs|file)\.core\.windows\.net$", re.I)
 
 # Domain block feeds + the popularity/allowlist flag are loaded (and cached) via feeds.loaders; see
-# feeds/domains.py. c2intel is keyless; threatfox/urlhaus are abuse.ch (need --abuse-ch-auth-key).
+# feeds/domains.py. c2intel is keyless; threatfox/urlhaus are abuse.ch (need an Auth-Key — prompted
+# interactively, or DBX_NWP_ABUSE_CH_AUTH_KEY). Feeds/key/allowlist are resolved by
+# guided.resolve_threat_domain_feeds behind the single --block-threat-domains flag.
 
 # Databricks-owned domains. The egress API rejects any host in these as an internet destination
 # ("Workspace URL '…' not allowed as internet destination: `allowed_internet_destinations`") —
@@ -54,6 +56,14 @@ _DATABRICKS_URL_SUFFIXES = (
 
 def _is_databricks_url(host: str) -> bool:
     return host in ("databricks.com", "azuredatabricks.net") or host.endswith(_DATABRICKS_URL_SUFFIXES)
+
+
+# Feed severity ranking (lower = kept first) used when the block set exceeds the egress cap. C2
+# command-and-control domains outrank general malware-URL feeds; unknown feeds sort last. This is one
+# input to the prioritised cap in _blocked_domains (alongside matched-in-traffic and popularity),
+# mirroring the ingress threat-deny CIDR prioritisation (_deny_sort_key in core/ingress_rules.py).
+_DOMAIN_FEED_PRIORITY = {"c2intel": 0, "threatfox": 1, "urlhaus": 2}
+_DOMAIN_FEED_DEFAULT_PRIORITY = 3
 
 
 @dataclass
@@ -459,39 +469,65 @@ def _blocked_domains(analysis: EgressAnalysis, cfg: EgressConfig, note: Note):
     feed_df = loaders.threat_domains(
         cfg.threat_feeds, auth_key=cfg.abuse_ch_auth_key, refresh=cfg.refresh_feeds, note=note
     )
-    feed = set(feed_df["domain"]) if not feed_df.empty else set()
+    if feed_df.empty:
+        analysis.blocked_domains = []
+        return
+    source_by_domain = dict(zip(feed_df["domain"], feed_df["source"], strict=False))
     all_fqdns = union(analysis.targets, "internet")
     if cfg.block_threat_domains == "matched_only":
-        blocked = sorted(f for f in all_fqdns if f in feed)
+        candidates = [d for d in source_by_domain if d in all_fqdns]
     else:
-        blocked = sorted(feed)
-    if len(blocked) > MAX_INTERNET_DESTINATIONS:
+        candidates = list(source_by_domain)
+    # Load the popularity/allowlist once: it both deprioritises popular domains under the cap below
+    # and drives the flag-only review note in _flag_popular_block_candidates.
+    allow_map = _allowlist_map(cfg, note)
+
+    def _priority(domain: str) -> tuple:
+        # Lower sorts first (= kept when capping). Real traffic beats raw feed hits; among equals we
+        # drop popularity-allowlisted domains first (riskiest to block) and keep higher-severity feeds.
+        return (
+            0 if domain in all_fqdns else 1,
+            1 if domain in allow_map else 0,
+            _DOMAIN_FEED_PRIORITY.get(source_by_domain.get(domain, ""), _DOMAIN_FEED_DEFAULT_PRIORITY),
+            domain,
+        )
+
+    candidates.sort(key=_priority)
+    if len(candidates) > MAX_INTERNET_DESTINATIONS:
         _record_truncation(
             analysis,
-            f"{len(blocked)} blocked domains > {MAX_INTERNET_DESTINATIONS} limit — keeping the "
-            f"first {MAX_INTERNET_DESTINATIONS}. Use matched_only to narrow.",
+            f"{len(candidates)} blocked domains > {MAX_INTERNET_DESTINATIONS} limit — prioritising: "
+            f"domains seen in your traffic first, then higher-severity feeds, deprioritising "
+            f"popularity-allowlisted ones; keeping {MAX_INTERNET_DESTINATIONS}. Use "
+            f"--block-threat-domains matched_only to block only domains seen in your traffic, or "
+            f"select fewer feeds when prompted.",
             note,
         )
-        blocked = blocked[:MAX_INTERNET_DESTINATIONS]
-    analysis.blocked_domains = blocked
-    _flag_popular_block_candidates(analysis, cfg, blocked, note)
+        candidates = candidates[:MAX_INTERNET_DESTINATIONS]
+    analysis.blocked_domains = candidates
+    _flag_popular_block_candidates(analysis, candidates, allow_map, note)
 
 
-def _flag_popular_block_candidates(analysis: EgressAnalysis, cfg: EgressConfig, blocked: list, note: Note):
-    """Flag-only safety net: mark any block-candidate that also appears on a popularity/allowlist
-    (MISP warninglists / Tranco) for review. Never removes it from the block set — popular != benign;
-    these lists can contain real C2 (per the security guidance). Off with --no-domain-allowlist."""
-    if not cfg.domain_allowlist or not blocked:
-        return
+def _allowlist_map(cfg: EgressConfig, note: Note) -> dict:
+    """domain -> popularity/allowlist source (MISP warninglists / Tranco). Empty when the check is
+    off (cfg.domain_allowlist is False) or the feeds are unavailable."""
+    if not cfg.domain_allowlist:
+        return {}
     from ..feeds import loaders
 
-    allow_df = loaders.allowlist_domains(
-        cfg.domain_allowlist_feeds, refresh=cfg.refresh_feeds, note=note
-    )
+    allow_df = loaders.allowlist_domains(cfg.domain_allowlist_feeds, refresh=cfg.refresh_feeds, note=note)
     if allow_df.empty:
+        return {}
+    return dict(zip(allow_df["domain"], allow_df["source"], strict=False))
+
+
+def _flag_popular_block_candidates(analysis: EgressAnalysis, blocked: list, allow_map: dict, note: Note):
+    """Flag-only safety net: mark any block-candidate that also appears on a popularity/allowlist
+    (MISP warninglists / Tranco) for review. Never removes it from the block set — popular != benign;
+    these lists can contain real C2 (per the security guidance). Empty allow_map = check off."""
+    if not allow_map or not blocked:
         return
-    source_by_domain = dict(zip(allow_df["domain"], allow_df["source"], strict=False))
-    flagged = [(d, source_by_domain[d]) for d in blocked if d in source_by_domain]
+    flagged = [(d, allow_map[d]) for d in blocked if d in allow_map]
     analysis.blocked_but_popular = flagged
     if flagged:
         note(

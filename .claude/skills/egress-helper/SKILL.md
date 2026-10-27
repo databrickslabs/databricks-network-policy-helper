@@ -50,8 +50,12 @@ If the table is empty, no egress policy is logging yet — start with step 1.
    internet FQDNs, one for storage destinations (S3 / GCS / Azure).
 5. Optional **threat-intel domain blocking** (`--block-threat-domains`: off / matched_only / all) →
    `blocked_internet_destinations` (FQDN-only, enforced in any mode, takes precedence over allows).
-   Feed (`--threat-feed`, free/no key): `threatfox` — abuse.ch ThreatFox botnet-C2 IOCs, the best
-   fit for the exfil use case. `matched_only` is the sensible default given the 100-FQDN cap.
+   When not `off`, an interactive run then asks which feeds to use (`c2intel` keyless default;
+   abuse.ch `threatfox`/`urlhaus` when an Auth-Key is entered or `DBX_NWP_ABUSE_CH_AUTH_KEY` is set)
+   and whether to flag popularity-allowlisted candidates; headless / `--yes` runs use the keyless
+   feeds plus the abuse.ch feeds when the key env var is set. `matched_only` is the sensible default
+   given the 100-FQDN cap (over which the block set is risk-prioritised: traffic-matched and
+   higher-severity feeds kept, popularity-allowlisted dropped first).
 
    > **What actually stops data exfiltration** (e.g. a LiteLLM-style credential/data leak to an
    > attacker server) is the RESTRICTED_ACCESS allow-list itself: with egress enforced, traffic to
@@ -70,7 +74,8 @@ If the table is empty, no egress policy is logging yet — start with step 1.
 - `--policy-name` (prompted if omitted, blank = the profile name; the policy id for single-policy
   scopes, the prefix → `<name>-ws-<id>` for per_workspace), `--policy-mode`
   (**dry_run** default / enforce), `--policy-scope` (**current_workspace** default / per_workspace /
-  all_workspaces), `--block-threat-domains`, `--threat-feed`
+  all_workspaces), `--block-threat-domains` (feeds / Auth-Key / allowlist prompted interactively when
+  not `off`; `DBX_NWP_ABUSE_CH_AUTH_KEY` for headless abuse.ch feeds)
 - `--select-rules` / `--no-select-rules` — interactively curate which observed destinations to
   allow-list (on by default in interactive runs, as two prompts: FQDNs then storage; skipped with
   `--yes`)

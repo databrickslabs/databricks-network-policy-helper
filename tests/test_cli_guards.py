@@ -163,9 +163,7 @@ def test_confirm_truncation_reselect_returns_false(monkeypatch):
 
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("typer.confirm", lambda *a, **k: False)  # decline "continue?"
-    monkeypatch.setattr(
-        questionary, "select", lambda *a, **k: types.SimpleNamespace(ask=lambda: "reselect")
-    )
+    monkeypatch.setattr(questionary, "select", lambda *a, **k: types.SimpleNamespace(ask=lambda: "reselect"))
     # allow_reselect + "go back" -> return False (caller loops back to selection), no raise
     assert cli._confirm_truncation(["capped"], yes=False, allow_reselect=True) is False
 
@@ -176,9 +174,7 @@ def test_confirm_truncation_reselect_abort_exits(monkeypatch):
 
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("typer.confirm", lambda *a, **k: False)  # decline "continue?"
-    monkeypatch.setattr(
-        questionary, "select", lambda *a, **k: types.SimpleNamespace(ask=lambda: "abort")
-    )
+    monkeypatch.setattr(questionary, "select", lambda *a, **k: types.SimpleNamespace(ask=lambda: "abort"))
     with pytest.raises(typer.Exit) as exc:
         cli._confirm_truncation(["capped"], yes=False, allow_reselect=True)
     assert exc.value.exit_code == 0  # abort -> clean exit
@@ -1535,3 +1531,59 @@ def test_guide_pdf_without_browser_points_to_button(monkeypatch, tmp_path):
     result = runner.invoke(cli.app, ["guide", "--pdf", str(tmp_path / "g.pdf")])
     assert result.exit_code == 1
     assert "Save as PDF" in _plain(result.stdout)  # falls back to the on-page button
+
+
+# ---------------------------------------------------- threat-domain feed resolution (--block-threat-domains)
+def test_resolve_threat_domain_feeds_noninteractive_keyless(monkeypatch):
+    # No TTY / --yes and no abuse.ch key → only the keyless default feeds, no key, allowlist on.
+    from dbx_nwp_helper import guided
+
+    monkeypatch.delenv("DBX_NWP_ABUSE_CH_AUTH_KEY", raising=False)
+    feeds, key, allowlist = guided.resolve_threat_domain_feeds(interactive=False)
+    assert feeds == ["c2intel"]
+    assert key is None
+    assert allowlist is True
+
+
+def test_resolve_threat_domain_feeds_noninteractive_with_key(monkeypatch):
+    # With the env key set, the abuse.ch feeds activate automatically in headless runs.
+    from dbx_nwp_helper import guided
+
+    monkeypatch.setenv("DBX_NWP_ABUSE_CH_AUTH_KEY", "secret")
+    feeds, key, allowlist = guided.resolve_threat_domain_feeds(interactive=False)
+    assert feeds == ["c2intel", "threatfox", "urlhaus"]
+    assert key == "secret"
+    assert allowlist is True
+
+
+# ------------------------------------------------------- threat-intel IP feed resolution (--block-threat-ips)
+def test_resolve_threat_ip_feeds_headless_uses_all_feeds():
+    # Headless (or no TTY) always loads every feed — the safe default for the always-on flagging path.
+    from dbx_nwp_helper import guided
+    from dbx_nwp_helper.config import THREAT_FEEDS
+
+    assert guided.resolve_threat_ip_feeds(interactive=False, engaged=True) == list(THREAT_FEEDS)
+    assert guided.resolve_threat_ip_feeds(interactive=False, engaged=False) == list(THREAT_FEEDS)
+
+
+def test_resolve_threat_ip_feeds_interactive_off_skips_picker(monkeypatch):
+    # Interactive but deny rules off → no checkbox, just all feeds (flagging still runs on all feeds).
+    from dbx_nwp_helper import guided
+    from dbx_nwp_helper.config import THREAT_FEEDS
+
+    monkeypatch.setattr(
+        guided.questionary, "checkbox", lambda *a, **k: pytest.fail("picker should not be shown")
+    )
+    assert guided.resolve_threat_ip_feeds(interactive=True, engaged=False) == list(THREAT_FEEDS)
+
+
+def test_resolve_threat_ip_feeds_interactive_engaged_shows_picker(monkeypatch):
+    # Interactive + engaged → the checkbox is shown and its selection is returned.
+    from dbx_nwp_helper import guided
+
+    monkeypatch.setattr(
+        guided.questionary,
+        "checkbox",
+        lambda *a, **k: types.SimpleNamespace(ask=lambda: ["ipsum", "tor_exit"]),
+    )
+    assert guided.resolve_threat_ip_feeds(interactive=True, engaged=True) == ["ipsum", "tor_exit"]

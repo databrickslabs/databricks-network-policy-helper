@@ -84,8 +84,8 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 
 **Command-specific:**
 
-- 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--threat-deny-rules`, `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--include-inbound-network` (use dry-run CBI denials as allow-list candidates; on by default), `--disable-existing-ip-acls`. Existing IP access lists are **auto-detected** and you're prompted (a per-entry checkbox) to migrate them; on AWS/GCP a **non-allow-all** front-end PrivateLink PAS is likewise **auto-detected** and offered for migration into a `private_access` block, and any existing CBI `private_access` is carried forward — no flags. (Azure doesn't migrate PrivateLink.)
-- 📤 **`egress`**: `--block-threat-domains` (off/matched_only/all), `--threat-feeds` (c2intel/threatfox/urlhaus), `--abuse-ch-auth-key` (+ `DBX_NWP_ABUSE_CH_AUTH_KEY`), `--domain-allowlist`/`--no-domain-allowlist`, `--domain-allowlist-feeds`, `--source-type-filter`.
+- 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--block-threat-ips` (off/matched_only/all — interactive feed picker when not off), `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--include-inbound-network` (use dry-run CBI denials as allow-list candidates; on by default), `--disable-existing-ip-acls`. Existing IP access lists are **auto-detected** and you're prompted (a per-entry checkbox) to migrate them; on AWS/GCP a **non-allow-all** front-end PrivateLink PAS is likewise **auto-detected** and offered for migration into a `private_access` block, and any existing CBI `private_access` is carried forward — no flags. (Azure doesn't migrate PrivateLink.)
+- 📤 **`egress`**: `--block-threat-domains` (off/matched_only/all) — when not `off`, an interactive run then asks which feeds to use (c2intel/threatfox/urlhaus), for an abuse.ch Auth-Key when a key-gated feed is chosen (or `DBX_NWP_ABUSE_CH_AUTH_KEY`), and whether to flag popularity-allowlisted candidates; `--source-type-filter`.
 
 ## 🗺️ How each command flows
 
@@ -250,10 +250,12 @@ All feeds are **free, need no API key, and download over HTTPS** — cached loca
 distribution. Full detail (grain, confidence mapping, what's deliberately excluded) is in
 [`docs/threat-intel-feeds.md`](docs/threat-intel-feeds.md).
 
-**Ingress** (`--threat-feeds`, all on by default) flags observed source IPs that fall in known-bad
-ranges — those groups are excluded from the allow-list and surfaced for investigation:
+**Ingress** (`--block-threat-ips`) always flags observed source IPs that fall in known-bad ranges —
+those groups are excluded from the allow-list and surfaced for investigation — and, when set to
+`matched_only`/`all`, also builds CBI **deny rules**. When it's not `off`, an interactive run then
+asks which feeds to use (checkbox); headless runs use all feeds:
 
-| Feed | `--threat-feeds` key | What it is |
+| Feed | key | What it is |
 |---|---|---|
 | [Spamhaus DROP](https://www.spamhaus.org/blocklists/do-not-route-or-peer/) | `spamhaus_drop` | Hijacked / botnet-C2 network ranges (v4 + v6). |
 | [Tor exit list](https://check.torproject.org/torbulkexitlist) | `tor_exit` | Tor exit-node IPs (anonymiser infrastructure; not inherently malicious). |
@@ -267,22 +269,24 @@ ranges — those groups are excluded from the allow-list and surfaced for invest
 > when it's unreachable the loader falls back to the [dan.me.uk](https://www.dan.me.uk/tornodes) Tor
 > list (rate-limited, so guarded). If you still see `⚠️ feed fetch failed`, ignore it or deselect `tor_exit`.
 
-**Egress** (`--block-threat-domains` with `--threat-feeds`) can block known-bad **domains** (select
-one or more, comma-separated; default `c2intel`):
+**Egress** (`--block-threat-domains`) can block known-bad **domains**. When the flag is not `off`, an
+interactive run then asks which feeds to use (checkbox); non-interactive runs use the keyless feeds
+plus the abuse.ch feeds when a key is set:
 
-| Feed | `--threat-feeds` key | Auth | What it is |
+| Feed | key | Auth | What it is |
 |---|---|---|---|
 | [C2IntelFeeds](https://github.com/drb-ra/C2IntelFeeds) | `c2intel` | none | Validated C2 domains (30-day). Keyless default. |
 | [abuse.ch ThreatFox](https://threatfox.abuse.ch/) | `threatfox` | Auth-Key | Botnet C2 domain IOCs. |
 | [abuse.ch URLhaus](https://urlhaus.abuse.ch/) | `urlhaus` | Auth-Key | Malware-distribution URL hosts. |
 
-> **abuse.ch feeds need a free Auth-Key** (sign up at [auth.abuse.ch](https://auth.abuse.ch/)) — pass
-> `--abuse-ch-auth-key` or set `DBX_NWP_ABUSE_CH_AUTH_KEY`. Without one, `threatfox`/`urlhaus` are
-> skipped and only the keyless `c2intel` feed loads.
+> **abuse.ch feeds need a free Auth-Key** (sign up at [auth.abuse.ch](https://auth.abuse.ch/)) — the
+> interactive run prompts for it when you pick a key-gated feed, or set `DBX_NWP_ABUSE_CH_AUTH_KEY`.
+> Without one, `threatfox`/`urlhaus` are skipped and only the keyless `c2intel` feed loads.
 >
-> Before enforcing a block list, `--domain-allowlist` (on by default) cross-checks candidates against
-> popularity/allowlist sources (Tranco, MISP warninglists) and **flags** overlaps for review — it
-> never auto-unblocks, because popular ≠ benign.
+> Before enforcing a block list, the popularity-allowlist check (on by default) cross-checks
+> candidates against popularity/allowlist sources (Tranco, MISP warninglists) and **flags** overlaps
+> for review — it never auto-unblocks, because popular ≠ benign. When the block set exceeds the
+> 100-destination cap, these flagged domains are dropped first and traffic-matched domains are kept.
 >
 > The **allow-list itself** is the control that stops exfiltration; the block feed is a secondary
 > layer that only catches *known* bad domains. See the egress helper docs for more.
