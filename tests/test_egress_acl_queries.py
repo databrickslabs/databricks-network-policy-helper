@@ -587,6 +587,46 @@ def test_blocked_domains_empty_feed_blocks_nothing(monkeypatch):
     assert a.blocked_domains == []
 
 
+def test_popularity_source_matches_parent_domain():
+    allow = {"githubusercontent.com": "cloudflare-top1k", "github.com": "cloudflare-top1k"}
+    # a popular subdomain is matched via its registrable parent …
+    assert eg._popularity_source("raw.githubusercontent.com", allow) == "cloudflare-top1k"
+    # … exact hostnames still match …
+    assert eg._popularity_source("github.com", allow) == "cloudflare-top1k"
+    # … unrelated domains don't, and a bare TLD is never matched (even if in the map) …
+    assert eg._popularity_source("evil.example", allow) is None
+    assert eg._popularity_source("com", {"com": "x"}) is None
+    # … and the most specific match wins.
+    assert eg._popularity_source("a.b.com", {"a.b.com": "s1", "b.com": "s2"}) == "s1"
+    # A bare public suffix (e.g. ac.uk, which is present in the Cloudflare feed) must NOT match every
+    # domain beneath it — otherwise a malicious evil.ac.uk gets over-flagged/deprioritised.
+    assert eg._popularity_source("evil.ac.uk", {"ac.uk": "cloudflare-top1k"}) is None
+    assert eg._popularity_source("cam.ac.uk", {"cam.ac.uk": "tranco", "ac.uk": "x"}) == "tranco"
+    # An empty-string source still counts as a match (membership), unlike a plain truthiness test.
+    assert eg._popularity_source("x.com", {"x.com": ""}) == ""
+
+
+def test_blocked_domains_flags_popular_subdomain(monkeypatch):
+    # A popular *subdomain* (raw.githubusercontent.com) must be flagged + deprioritised via its
+    # registrable parent on the allowlist (githubusercontent.com), not just exact-hostname matches.
+    monkeypatch.setattr(
+        "dbx_nwp_helper.feeds.loaders.threat_domains",
+        lambda *a, **k: pd.DataFrame(
+            {"domain": ["raw.githubusercontent.com", "evil.example"], "source": ["threatfox", "threatfox"]}
+        ),
+    )
+    monkeypatch.setattr(
+        "dbx_nwp_helper.feeds.loaders.allowlist_domains",
+        lambda *a, **k: pd.DataFrame({"domain": ["githubusercontent.com"], "source": ["cloudflare-top1k"]}),
+    )
+    a = _analysis_with_internet({})  # neither seen in traffic → popularity is the tiebreak
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="all", domain_allowlist=True)
+    eg._blocked_domains(a, cfg, lambda _m: None)
+    assert ("raw.githubusercontent.com", "cloudflare-top1k") in a.blocked_but_popular
+    # deprioritised: the popular subdomain sorts after the non-popular one
+    assert a.blocked_domains.index("evil.example") < a.blocked_domains.index("raw.githubusercontent.com")
+
+
 def test_egress_warns_and_caps_over_internet_limit():
     # >100 internet FQDNs must be capped to the limit AND the operator warned (silent truncation
     # would block the dropped destinations in enforce mode).

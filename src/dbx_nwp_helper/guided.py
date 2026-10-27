@@ -50,7 +50,10 @@ def _select(message: str, choices: list[str], default: str | None = None) -> str
 
 
 def _confirm(message: str, default: bool = False) -> bool:
-    return questionary.confirm(message, default=default, style=_STYLE).ask()
+    # auto_enter=False: a y/n keypress alone must NOT submit — the answer requires an explicit Enter.
+    # Otherwise a single keystroke confirms instantly and a habitual follow-up Enter falls through to
+    # the next prompt, accepting its default (e.g. selecting the wrong profile/workspace).
+    return questionary.confirm(message, default=default, style=_STYLE, auto_enter=False).ask()
 
 
 def _text(message: str, default: str = "") -> str:
