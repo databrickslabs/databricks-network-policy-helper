@@ -13,6 +13,8 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-27
+
 ### Fixed
 
 - **Guided yes/no prompts no longer submit on a single keystroke.** `questionary.confirm` prompts (e.g.
@@ -277,7 +279,8 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.5.0...v0.6.0
