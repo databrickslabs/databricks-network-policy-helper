@@ -1587,3 +1587,19 @@ def test_resolve_threat_ip_feeds_interactive_engaged_shows_picker(monkeypatch):
         lambda *a, **k: types.SimpleNamespace(ask=lambda: ["ipsum", "tor_exit"]),
     )
     assert guided.resolve_threat_ip_feeds(interactive=True, engaged=True) == ["ipsum", "tor_exit"]
+
+
+def test_guided_confirm_requires_explicit_enter(monkeypatch):
+    # The confirm helper must pass auto_enter=False so a single y/n keypress doesn't auto-submit and
+    # let a habitual follow-up Enter fall through to the next prompt (e.g. profile/workspace select).
+    from dbx_nwp_helper import guided
+
+    captured: dict = {}
+
+    def fake_confirm(message, **kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(ask=lambda: True)
+
+    monkeypatch.setattr(guided.questionary, "confirm", fake_confirm)
+    assert guided._confirm("ok?", default=True) is True
+    assert captured.get("auto_enter") is False

@@ -487,7 +487,7 @@ def _blocked_domains(analysis: EgressAnalysis, cfg: EgressConfig, note: Note):
         # drop popularity-allowlisted domains first (riskiest to block) and keep higher-severity feeds.
         return (
             0 if domain in all_fqdns else 1,
-            1 if domain in allow_map else 0,
+            1 if _popularity_source(domain, allow_map) is not None else 0,
             _DOMAIN_FEED_PRIORITY.get(source_by_domain.get(domain, ""), _DOMAIN_FEED_DEFAULT_PRIORITY),
             domain,
         )
@@ -521,13 +521,118 @@ def _allowlist_map(cfg: EgressConfig, note: Note) -> dict:
     return dict(zip(allow_df["domain"], allow_df["source"], strict=False))
 
 
+# Common multi-label public suffixes (registrations happen *under* these, e.g. foo.co.uk). The
+# allowlist feeds occasionally include one — 'ac.uk' is present in Cloudflare's top-1k — so without a
+# full Public Suffix List we skip this curated set in the parent walk: matching a bare suffix would
+# wrongly flag every registrable domain beneath it as "popular". Heuristic, not exhaustive; the check
+# is flag-only, so a missed entry at worst adds review noise, never an auto-block/unblock.
+_PUBLIC_SUFFIXES = frozenset(
+    {
+        "co.uk",
+        "org.uk",
+        "me.uk",
+        "ac.uk",
+        "gov.uk",
+        "net.uk",
+        "sch.uk",
+        "ltd.uk",
+        "plc.uk",
+        "nhs.uk",
+        "com.au",
+        "net.au",
+        "org.au",
+        "edu.au",
+        "gov.au",
+        "id.au",
+        "co.nz",
+        "net.nz",
+        "org.nz",
+        "govt.nz",
+        "ac.nz",
+        "co.jp",
+        "ne.jp",
+        "or.jp",
+        "go.jp",
+        "ac.jp",
+        "ad.jp",
+        "com.br",
+        "net.br",
+        "org.br",
+        "gov.br",
+        "edu.br",
+        "co.in",
+        "net.in",
+        "org.in",
+        "gen.in",
+        "firm.in",
+        "gov.in",
+        "co.za",
+        "org.za",
+        "net.za",
+        "gov.za",
+        "ac.za",
+        "com.cn",
+        "net.cn",
+        "org.cn",
+        "gov.cn",
+        "edu.cn",
+        "co.kr",
+        "or.kr",
+        "ne.kr",
+        "re.kr",
+        "go.kr",
+        "com.mx",
+        "com.ar",
+        "com.co",
+        "com.tr",
+        "com.sg",
+        "com.hk",
+        "com.tw",
+        "com.ua",
+        "com.pl",
+        "com.ph",
+        "com.my",
+        "com.ng",
+        "com.sa",
+        "com.eg",
+        "com.pk",
+        "com.vn",
+        "com.bd",
+        "co.id",
+        "co.th",
+        "co.il",
+        "co.ke",
+    }
+)
+
+
+def _popularity_source(domain: str, allow_map: dict) -> str | None:
+    """The popularity/allowlist source for a domain *or any of its parent domains*, so a popular
+    registrable domain also flags its subdomains (e.g. raw.githubusercontent.com via
+    githubusercontent.com — the feeds list the registrable domain, not every subdomain). Walks from
+    the full hostname up to the registrable level (2 labels), skipping known public suffixes (so e.g.
+    ``ac.uk`` doesn't match every ``*.ac.uk``), and returns the most specific match's source. Returns
+    ``None`` only when nothing matched — an empty-string source still counts as a match (membership),
+    matching the old ``domain in allow_map`` test. Flag-only, so broader matching never removes a
+    block."""
+    labels = domain.split(".")
+    for i in range(len(labels) - 1):
+        suffix = ".".join(labels[i:])
+        if suffix in _PUBLIC_SUFFIXES:
+            continue
+        src = allow_map.get(suffix)
+        if src is not None:
+            return src
+    return None
+
+
 def _flag_popular_block_candidates(analysis: EgressAnalysis, blocked: list, allow_map: dict, note: Note):
     """Flag-only safety net: mark any block-candidate that also appears on a popularity/allowlist
     (MISP warninglists / Tranco) for review. Never removes it from the block set — popular != benign;
     these lists can contain real C2 (per the security guidance). Empty allow_map = check off."""
     if not allow_map or not blocked:
         return
-    flagged = [(d, allow_map[d]) for d in blocked if d in allow_map]
+    flagged = [(d, src) for d in blocked if (src := _popularity_source(d, allow_map)) is not None]
     analysis.blocked_but_popular = flagged
     if flagged:
         note(

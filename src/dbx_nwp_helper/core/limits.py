@@ -17,6 +17,14 @@ from ..config import (
 Warn = Callable[[str], None]
 
 
+def _label_list(rules: list[dict], limit: int = 10) -> str:
+    """Comma-joined rule labels, capped so a big drop doesn't produce a wall of text."""
+    labels = [r.get("label", "?") for r in rules]
+    if len(labels) > limit:
+        return ", ".join(labels[:limit]) + f", …+{len(labels) - limit} more"
+    return ", ".join(labels)
+
+
 def enforce_limits(
     specs: list[dict], deny: list[dict], label: str, warn: Warn
 ) -> tuple[list[dict], list[dict]]:
@@ -31,23 +39,39 @@ def enforce_limits(
             )
             spec["identities"] = spec["identities"][:MAX_IDENTITIES_PER_POLICY]
 
-    # Ingress rules per policy (50): allow + deny combined.
+    # Ingress rules per policy (50): allow + deny combined. Allow rules are prioritised (so legitimate
+    # traffic stays reachable); deny rules take whatever budget is left. When that pushes deny rules
+    # (or trailing allow rules) out, say so explicitly and by name — a silent drop here would quietly
+    # discard security rules the operator asked for (e.g. --block-threat-ips / --deny-denied-ips).
     all_rules = specs + list(deny)
     if len(all_rules) > MAX_INGRESS_RULES_PER_POLICY:
-        warn(
-            f"[{label}] {len(all_rules)} rules (allow+deny) > {MAX_INGRESS_RULES_PER_POLICY} "
-            f"— keeping the first {MAX_INGRESS_RULES_PER_POLICY} (allow rules prioritised)."
-        )
-        specs = specs[:MAX_INGRESS_RULES_PER_POLICY]
-        remaining = MAX_INGRESS_RULES_PER_POLICY - len(specs)
-        deny = deny[: max(remaining, 0)]
+        kept_allow = specs[:MAX_INGRESS_RULES_PER_POLICY]
+        kept_deny = deny[: max(MAX_INGRESS_RULES_PER_POLICY - len(kept_allow), 0)]
+        dropped_allow = specs[len(kept_allow) :]
+        dropped_deny = deny[len(kept_deny) :]
+        parts = [
+            f"[{label}] {len(all_rules)} rules (allow+deny) > {MAX_INGRESS_RULES_PER_POLICY} — kept "
+            f"{len(kept_allow)} allow + {len(kept_deny)} deny (allow rules prioritised); dropped "
+            f"{len(dropped_deny)} deny and {len(dropped_allow)} allow rule(s)."
+        ]
+        if dropped_deny:
+            parts.append(
+                f"DENY rules dropped — the threat-intel / denied-IP denies you requested will NOT be "
+                f"in this policy: {_label_list(dropped_deny)}."
+            )
+        if dropped_allow:
+            parts.append(f"Allow rules dropped: {_label_list(dropped_allow)}.")
+        warn(" ".join(parts))
+        specs, deny = kept_allow, kept_deny
 
     def _total_cidrs(rs):
         return sum(len(r["cidrs"]) for r in rs)
 
-    budget = MAX_CIDRS_PER_POLICY - _total_cidrs(specs)
+    allow_cidrs = _total_cidrs(specs)
+    budget = MAX_CIDRS_PER_POLICY - allow_cidrs
     if budget < 0:
-        warn(f"[{label}] allow CIDRs alone exceed {MAX_CIDRS_PER_POLICY} — trimming allow rules.")
+        # Allow CIDRs alone blow the budget: trim allow rules to fit, and drop deny rules entirely.
+        # Say so by count and name — like the rule-count cap, this can silently zero requested denies.
         trimmed, used = [], 0
         for r in specs:
             room = MAX_CIDRS_PER_POLICY - used
@@ -56,16 +80,42 @@ def enforce_limits(
             r = dict(r, cidrs=r["cidrs"][:room])
             trimmed.append(r)
             used += len(r["cidrs"])
+        dropped_allow = specs[len(trimmed) :]
+        parts = [
+            f"[{label}] allow CIDRs ({allow_cidrs:,}) alone exceed the {MAX_CIDRS_PER_POLICY:,}-CIDR "
+            f"policy limit — kept {used:,}, dropped {len(dropped_allow)} allow and all {len(deny)} "
+            f"deny rule(s)."
+        ]
+        if deny:
+            parts.append(
+                f"DENY rules dropped — the threat-intel / denied-IP denies you requested will NOT be "
+                f"in this policy: {_label_list(deny)}."
+            )
+        if dropped_allow:
+            parts.append(f"Allow rules fully dropped: {_label_list(dropped_allow)}.")
+        warn(" ".join(parts))
         specs, deny = trimmed, []
     else:
+        deny_cidrs = _total_cidrs(deny)
         trimmed_deny, used = [], 0
         for r in deny:
             room = budget - used
             if room <= 0:
-                warn(f"[{label}] deny CIDRs trimmed to fit the {MAX_CIDRS_PER_POLICY}-CIDR policy limit.")
                 break
             r = dict(r, cidrs=r["cidrs"][:room])
             trimmed_deny.append(r)
             used += len(r["cidrs"])
+        if used < deny_cidrs:
+            dropped_deny = deny[len(trimmed_deny) :]
+            parts = [
+                f"[{label}] deny CIDRs trimmed to fit the {MAX_CIDRS_PER_POLICY:,}-CIDR policy limit — "
+                f"kept {used:,} of {deny_cidrs:,} deny CIDR(s)."
+            ]
+            if dropped_deny:
+                parts.append(
+                    f"Deny rules fully dropped (threat-intel / denied-IP denies NOT in the policy): "
+                    f"{_label_list(dropped_deny)}."
+                )
+            warn(" ".join(parts))
         deny = trimmed_deny
     return specs, deny

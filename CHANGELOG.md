@@ -13,6 +13,35 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-27
+
+### Fixed
+
+- **Guided yes/no prompts no longer submit on a single keystroke.** `questionary.confirm` prompts (e.g.
+  "Flag block-candidates that are also on a popularity/allowlist … for review?") defaulted to
+  `auto_enter=True`, so a lone `y`/`n` confirmed instantly and a habitual follow-up Enter fell through
+  to the next prompt — easy to accidentally accept the default on the following selection (e.g. the
+  wrong profile/workspace). Confirms now require an explicit Enter (`auto_enter=False`).
+- **The egress popularity/allowlist check now flags popular *subdomains*, not just exact hostnames.**
+  The feeds list registrable domains (e.g. `githubusercontent.com`), so a block candidate like
+  `raw.githubusercontent.com` — a ThreatFox IOC because malware is hosted on GitHub — slipped through
+  the "popular, review before blocking" safety net and even out-ranked `github.com` in the cap
+  ordering. The check now matches a candidate against its parent domains up to the registrable level
+  (skipping bare public suffixes such as `ac.uk`, which appears in the Cloudflare feed, so they don't
+  over-match every domain beneath them), so popular subdomains are flagged and deprioritised too.
+  Still flag-only (never auto-unblocks).
+
+### Changed
+
+- **Ingress truncation warnings now name exactly what they drop.** When a single policy exceeds the
+  50-rule limit *or* the 2,000-CIDR limit, the warnings previously said only "keeping the first 50
+  (allow rules prioritised)" / "trimming allow rules" / "deny CIDRs trimmed" — which could silently
+  discard the threat-intel / denied-IP **deny** rules you asked for (`--block-threat-ips` /
+  `--deny-denied-ips`) whenever the allow rules alone filled the budget. All three now itemise the
+  drop — counts of deny/allow rules (or CIDRs) removed, with the dropped deny rules listed by name —
+  so requested security rules can't vanish unnoticed. Allow rules are still prioritised, and each drop
+  is still a single message covered by the interactive Y/N truncation gate.
+
 ## [0.8.0] - 2026-10-27
 
 ### Changed
@@ -250,7 +279,8 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.5.0...v0.6.0

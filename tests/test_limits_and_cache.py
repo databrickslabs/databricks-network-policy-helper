@@ -38,6 +38,61 @@ def test_limits_caps_rule_count_prioritising_allow():
     assert deny_out == []  # no room left for deny
 
 
+def test_limits_cap_warning_itemises_dropped_rules():
+    # When the 50-rule cap drops rules, the warning must name the dropped deny (and allow) rules in a
+    # single message — a silent drop would quietly discard requested security rules.
+    specs = [{"label": f"a{i}", "cidrs": ["1.1.1.1/32"]} for i in range(MAX_INGRESS_RULES_PER_POLICY + 3)]
+    deny = [
+        {"label": "deny-c2intel", "cidrs": ["2.2.2.2/32"]},
+        {"label": "deny-denied-ips", "cidrs": ["3.3.3.3/32"]},
+    ]
+    msgs: list[str] = []
+    allow, deny_out = limits.enforce_limits(specs, deny, "single policy", msgs.append)
+    assert len(allow) == MAX_INGRESS_RULES_PER_POLICY and deny_out == []
+    cap = [m for m in msgs if "rules (allow+deny)" in m]
+    assert len(cap) == 1  # one message → the truncation gate still counts a single truncation
+    m = cap[0]
+    assert "dropped 2 deny and 3 allow rule(s)" in m
+    assert "DENY rules dropped" in m and "deny-c2intel" in m and "deny-denied-ips" in m
+    assert "a50" in m and "a52" in m  # the dropped allow rules are named too
+
+
+def test_limits_cidr_budget_allow_exceeds_names_dropped():
+    # Allow CIDRs alone over the limit → allow trimmed and deny fully dropped; message names both.
+    r1 = {
+        "label": "allow-big",
+        "cidrs": [f"10.0.{i // 256}.{i % 256}/32" for i in range(MAX_CIDRS_PER_POLICY)],
+    }
+    r2 = {"label": "allow-extra", "cidrs": ["11.0.0.1/32", "11.0.0.2/32"]}
+    deny = [{"label": "deny-c2intel", "cidrs": ["2.2.2.2/32"]}]
+    msgs: list[str] = []
+    allow, deny_out = limits.enforce_limits([r1, r2], deny, "single policy", msgs.append)
+    assert sum(len(r["cidrs"]) for r in allow) <= MAX_CIDRS_PER_POLICY and deny_out == []
+    cap = [m for m in msgs if "alone exceed" in m]
+    assert len(cap) == 1
+    m = cap[0]
+    assert "DENY rules dropped" in m and "deny-c2intel" in m
+    assert "allow-extra" in m  # the allow rule that didn't fit is named
+
+
+def test_limits_cidr_budget_deny_trim_names_dropped():
+    # Allow uses all but one CIDR of the budget; deny exceeds the remainder → partial keep + named drop.
+    allow = [
+        {"label": "a", "cidrs": [f"10.0.{i // 256}.{i % 256}/32" for i in range(MAX_CIDRS_PER_POLICY - 1)]}
+    ]
+    deny = [
+        {"label": "deny-1", "cidrs": ["2.2.2.1/32", "2.2.2.2/32"]},  # only 1 of 2 fits
+        {"label": "deny-2", "cidrs": ["3.3.3.3/32"]},  # fully dropped
+    ]
+    msgs: list[str] = []
+    allow_out, deny_out = limits.enforce_limits(allow, deny, "single policy", msgs.append)
+    assert sum(len(r["cidrs"]) for r in allow_out + deny_out) <= MAX_CIDRS_PER_POLICY
+    cap = [m for m in msgs if "deny CIDRs trimmed" in m]
+    assert len(cap) == 1
+    m = cap[0]
+    assert "kept 1 of 3 deny CIDR(s)" in m and "deny-2" in m
+
+
 def test_limits_caps_total_cidrs():
     # One allow rule with more than the CIDR budget -> trimmed.
     big = {"label": "a", "cidrs": [f"10.0.{i // 256}.{i % 256}/32" for i in range(MAX_CIDRS_PER_POLICY + 50)]}
