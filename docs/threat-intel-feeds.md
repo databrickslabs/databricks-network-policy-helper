@@ -2,9 +2,10 @@
 
 Almost all feeds are **free, need no API key/registration, and are directly downloadable over
 HTTPS** — the one exception is the **abuse.ch** domain feeds (ThreatFox / URLhaus), which now need a
-free opt-in Auth-Key (see below). Feeds are **selectable**: ingress IP feeds via `--threat-feeds`
-and egress domain feeds via `--threat-feeds` on `egress` (both default to all keyless feeds), with a
-checkbox in the guided wizard. All are cached locally with a TTL (`dbx-nwp-helper feeds list` /
+free opt-in Auth-Key (see below). Feeds are **selectable** via an interactive checkbox that each
+command launches when its threat flag is engaged — `ingress --block-threat-ips` (IP feeds) and
+`egress --block-threat-domains` (domain feeds); headless / `--yes` runs use all feeds (egress adds the
+abuse.ch feeds only when a key is set). All are cached locally with a TTL (`dbx-nwp-helper feeds list` /
 `feeds refresh`). Verify current licensing before any external/customer-facing distribution — terms
 can change.
 
@@ -50,8 +51,11 @@ abuse.ch Feodo Tracker (deprecated); abuse.ch SSLBL (now needs registration).
 
 ## Egress domain block feeds (`egress --block-threat-domains`)
 
-Selected via `--threat-feeds` on `egress` (default `c2intel`). Known-bad **domains** blocked as
-egress destinations.
+Enabled with `--block-threat-domains matched_only|all` on `egress`. An interactive run then picks the
+feeds via a checkbox (default `c2intel`); headless runs use `c2intel` plus the abuse.ch feeds when a
+key is set. Known-bad **domains** blocked as egress destinations. When the block set exceeds the
+100-destination cap it's risk-prioritised (traffic-matched first, then higher-severity feeds,
+popularity-allowlisted domains dropped first) rather than cut alphabetically.
 
 | Feed | key | Represents | Auth | URL |
 |---|---|---|---|---|
@@ -61,16 +65,18 @@ egress destinations.
 
 **abuse.ch Auth-Key.** As of 2024/25 abuse.ch retired its keyless bulk downloads (the old
 `/downloads/hostfile/` now returns `410 Gone`) and requires a **free** Auth-Key. Sign up at
-**https://auth.abuse.ch/**, then pass the key via `--abuse-ch-auth-key` or the
-`DBX_NWP_ABUSE_CH_AUTH_KEY` env var; the tool sends it as the `Auth-Key` HTTP header. Without a key,
-`threatfox`/`urlhaus` are **skipped with a note** and only the keyless feeds (`c2intel`) load.
+**https://auth.abuse.ch/**, then enter the key when the interactive run prompts for it (after you
+pick a key-gated feed) or set the `DBX_NWP_ABUSE_CH_AUTH_KEY` env var; the tool sends it as the
+`Auth-Key` HTTP header. Without a key, `threatfox`/`urlhaus` are **skipped with a note** and only the
+keyless feeds (`c2intel`) load.
 
-## Domain allowlist / popularity (flag-only — `--domain-allowlist`)
+## Domain allowlist / popularity (flag-only)
 
 Before enforcing a domain block list, the tool cross-checks block-candidates against popularity /
 allowlist sources and **flags** any overlap for review. It **never auto-unblocks** — popularity is
-**not** proof a domain is benign (these lists can and do contain real C2). Off with
-`--no-domain-allowlist`; sources selected via `--domain-allowlist-feeds`.
+**not** proof a domain is benign (these lists can and do contain real C2). The check is on by default
+whenever blocking; the interactive run offers to turn it off. Its hits also deprioritise domains
+under the 100-destination cap (dropped first).
 
 | Source | key(s) | Notes | URL |
 |---|---|---|---|

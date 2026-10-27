@@ -1397,9 +1397,6 @@ def ingress(
         "allow-list candidates — public inbound clients a log-only CBI policy would block but the "
         "allow-list doesn't yet cover. Best-effort; on by default, --no-include-inbound-network to skip.",
     ),
-    threat_feeds: str | None = typer.Option(
-        None, help="Comma-separated feeds (default: all). See `feeds list`."
-    ),
     enable_rdap: bool = typer.Option(True, help="RDAP owner lookup (needed for 'maximum')."),
     rdap_workers: int = typer.Option(
         16,
@@ -1415,7 +1412,12 @@ def ingress(
         "one per workspace seen; all_workspaces: a single policy from all workspaces' traffic.",
     ),
     policy_mode: Mode = typer.Option(Mode.dry_run, help="dry_run=log-only; enforce=blocking."),
-    threat_deny_rules: ThreatDeny = typer.Option(ThreatDeny.off, help="Threat-intel deny rules."),
+    block_threat_ips: ThreatDeny = typer.Option(
+        ThreatDeny.off,
+        help="Deny known-bad source IPs: off/matched_only/all (builds CBI deny rules). When not 'off', "
+        "an interactive run then asks which threat-intel feeds to use. Known-bad source IPs are always "
+        "flagged and kept out of the allow-list regardless of this setting.",
+    ),
     policy_name: str = typer.Option(
         "",
         help="Policy name. If omitted you'll be prompted (blank there = the profile name). The "
@@ -1461,9 +1463,12 @@ def ingress(
     ),
 ):
     """Build (and optionally apply) a context-based ingress (CBI) allow-list."""
-    from .config import THREAT_FEEDS as ALL_FEEDS
+    from . import guided
 
-    feeds = [f.strip() for f in threat_feeds.split(",") if f.strip()] if threat_feeds else list(ALL_FEEDS)
+    block = block_threat_ips.value
+    # Feeds always load to flag known-bad source IPs (kept out of the allow-list); the interactive
+    # picker is offered only when deny rules are engaged. Headless / --yes → all feeds.
+    feeds = guided.resolve_threat_ip_feeds(_interactive(yes), block != "off")
     cfg = IngressConfig(
         lookback_days=lookback_days,
         min_events=min_events,
@@ -1479,7 +1484,7 @@ def ingress(
         scoping_mode=scoping_mode.value,
         policy_scope=policy_scope.value,
         policy_mode=policy_mode.value,
-        threat_deny_rules=threat_deny_rules.value,
+        threat_deny_rules=block,
         policy_name=policy_name,
         export=export,
         deny_denied_ips=deny_denied_ips,
@@ -1523,28 +1528,11 @@ def egress(
     ),
     policy_mode: Mode = typer.Option(Mode.dry_run, help="dry_run=log-only; enforce=blocking."),
     block_threat_domains: ThreatDeny = typer.Option(
-        ThreatDeny.off, help="Block known-bad domains: off/matched_only/all."
-    ),
-    threat_feeds: str = typer.Option(
-        "c2intel",
-        help="Comma-separated domain block feeds: c2intel (keyless, default), threatfox, urlhaus. "
-        "threatfox/urlhaus are abuse.ch feeds and only load when --abuse-ch-auth-key is set.",
-    ),
-    abuse_ch_auth_key: str | None = typer.Option(
-        None,
-        envvar="DBX_NWP_ABUSE_CH_AUTH_KEY",
-        help="Free abuse.ch Auth-Key (sign up at https://auth.abuse.ch/) enabling the threatfox / "
-        "urlhaus domain feeds. Also read from DBX_NWP_ABUSE_CH_AUTH_KEY.",
-    ),
-    domain_allowlist: bool = typer.Option(
-        True,
-        help="Flag (don't block) domains that are also on a popularity/allowlist (MISP warninglists "
-        "/ Tranco) for review — a safety net against blocking legitimate traffic. --no-domain-allowlist "
-        "turns the check off.",
-    ),
-    domain_allowlist_feeds: str = typer.Option(
-        "cloudflare-top1k,cisco_top1000,majestic_million,tranco",
-        help="Comma-separated popularity/allowlist sources for the --domain-allowlist review flag.",
+        ThreatDeny.off,
+        help="Block known-bad domains: off/matched_only/all. When not 'off', an interactive run then "
+        "asks which threat feeds to use (c2intel keyless; threatfox/urlhaus need a free abuse.ch "
+        "Auth-Key) and whether to flag popularity-allowlisted candidates. Non-interactive / --yes runs "
+        "use the keyless feeds plus the abuse.ch feeds when DBX_NWP_ABUSE_CH_AUTH_KEY is set.",
     ),
     select_rules: bool = typer.Option(
         True,
@@ -1584,12 +1572,14 @@ def egress(
     ),
 ):
     """Build (and optionally apply) a serverless egress (SEG) allow-list."""
-    from .config import DEFAULT_EGRESS_THREAT_FEEDS, DOMAIN_ALLOWLIST_FEEDS
+    from . import guided
+    from .config import DEFAULT_EGRESS_THREAT_FEEDS
 
-    feeds = [f.strip() for f in threat_feeds.split(",") if f.strip()] or list(DEFAULT_EGRESS_THREAT_FEEDS)
-    allow_feeds = [f.strip() for f in domain_allowlist_feeds.split(",") if f.strip()] or list(
-        DOMAIN_ALLOWLIST_FEEDS
-    )
+    block = block_threat_domains.value
+    if block != "off":
+        feeds, abuse_ch_auth_key, domain_allowlist = guided.resolve_threat_domain_feeds(_interactive(yes))
+    else:
+        feeds, abuse_ch_auth_key, domain_allowlist = list(DEFAULT_EGRESS_THREAT_FEEDS), None, True
     cfg = EgressConfig(
         lookback_days=lookback_days,
         min_events=min_events,
@@ -1600,11 +1590,10 @@ def egress(
         export=export,
         policy_mode=policy_mode.value,
         policy_scope=policy_scope.value,
-        block_threat_domains=block_threat_domains.value,
+        block_threat_domains=block,
         threat_feeds=feeds,
         abuse_ch_auth_key=abuse_ch_auth_key,
         domain_allowlist=domain_allowlist,
-        domain_allowlist_feeds=allow_feeds,
         select_rules=select_rules,
         apply=ApplyOptions(
             create_policy=create_policy,

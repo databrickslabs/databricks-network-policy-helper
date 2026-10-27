@@ -11,10 +11,13 @@ confirms before anything is sent.
 
 from __future__ import annotations
 
+import os
+
 import questionary
 
 from . import console
 from .config import (
+    ABUSE_CH_FEEDS,
     BLOCK_THREAT_DOMAINS,
     DEFAULT_EGRESS_THREAT_FEEDS,
     DOMAIN_ALLOWLIST_FEEDS,
@@ -92,6 +95,22 @@ def run_wizard(conn: Connection) -> None:
         _run_egress(_egress_wizard(conn), conn, yes=False)
 
 
+def resolve_threat_ip_feeds(interactive: bool, engaged: bool) -> list[str]:
+    """Resolve the threat-intel IP feeds for ingress — the interactive selection behind the single
+    ``--block-threat-ips`` flag (the IP-side mirror of ``resolve_threat_domain_feeds``). These feeds
+    both flag known-bad source IPs (always, keeping them out of the allow-list) and, when the flag is
+    not ``off``, build CBI deny rules. A checkbox is offered only when the flag is engaged and the run
+    is interactive; otherwise all feeds load — the safe default for the always-on flagging path and
+    headless / ``--yes`` runs."""
+    if not (interactive and engaged):
+        return list(THREAT_FEEDS)
+    return questionary.checkbox(
+        "Select threat-intel feeds:",
+        choices=[questionary.Choice(f, checked=True) for f in THREAT_FEEDS],
+        style=_STYLE,
+    ).ask() or list(THREAT_FEEDS)
+
+
 def _ingress_wizard(conn: Connection) -> IngressConfig:
     console.rule("Ingress questions")
     lookback = _int("How many days of audit history to analyse?", 30)
@@ -100,16 +119,10 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
     scoping = _select("Scoping mode?", SCOPING_MODES, default="ip_only")
     scope = _select("Policy scope?", POLICY_SCOPES, default="current_workspace")
     enable_rdap = framing == "maximum" or _confirm("Do RDAP owner lookups (external calls)?", True)
-    all_feeds = _confirm("Use all threat-intel feeds?", True)
-    feeds = (
-        list(THREAT_FEEDS)
-        if all_feeds
-        else (
-            questionary.checkbox("Select threat-intel feeds:", choices=THREAT_FEEDS, style=_STYLE).ask()
-            or list(THREAT_FEEDS)
-        )
+    threat_deny = _select(
+        "Add threat-intel deny rules for known-bad source IPs?", THREAT_DENY_RULES, default="off"
     )
-    threat_deny = _select("Add threat-intel deny rules?", THREAT_DENY_RULES, default="off")
+    feeds = resolve_threat_ip_feeds(interactive=True, engaged=threat_deny != "off")
 
     apply = _apply_wizard(conn, scope, other="egress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
@@ -139,6 +152,44 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
     )
 
 
+def resolve_threat_domain_feeds(interactive: bool) -> tuple[list[str], str | None, bool]:
+    """Resolve the domain block feeds, abuse.ch Auth-Key, and popularity-allowlist toggle for a
+    ``--block-threat-domains`` run — the single interactive front door that replaces the old
+    ``--threat-feeds`` / ``--abuse-ch-auth-key`` / ``--domain-allowlist`` flags.
+
+    Interactive → a checkbox feed picker, then a key prompt only when a key-gated feed is selected.
+    Non-interactive (``--yes`` / no TTY) → the keyless feeds, plus the abuse.ch feeds when
+    ``DBX_NWP_ABUSE_CH_AUTH_KEY`` is set, with the allowlist review on. The key is always read from
+    ``DBX_NWP_ABUSE_CH_AUTH_KEY`` (and offered as the prompt default interactively)."""
+    env_key = os.environ.get("DBX_NWP_ABUSE_CH_AUTH_KEY") or None
+    if not interactive:
+        feeds = list(DEFAULT_EGRESS_THREAT_FEEDS)
+        if env_key:
+            feeds += [f for f in EGRESS_THREAT_FEEDS if f in ABUSE_CH_FEEDS]
+        return feeds, env_key, True
+    feeds = questionary.checkbox(
+        "Select domain block feeds (threatfox/urlhaus need an abuse.ch Auth-Key):",
+        choices=[
+            questionary.Choice(f, checked=f in DEFAULT_EGRESS_THREAT_FEEDS) for f in EGRESS_THREAT_FEEDS
+        ],
+        style=_STYLE,
+    ).ask() or list(DEFAULT_EGRESS_THREAT_FEEDS)
+    auth_key = env_key
+    if any(f in ABUSE_CH_FEEDS for f in feeds):
+        auth_key = (
+            _text(
+                "abuse.ch Auth-Key (blank to skip those feeds; sign up at auth.abuse.ch)",
+                default=env_key or "",
+            )
+            or None
+        )
+    allowlist = _confirm(
+        "Flag block-candidates that are also on a popularity/allowlist (Tranco/MISP) for review?",
+        True,
+    )
+    return feeds, auth_key, allowlist
+
+
 def _egress_wizard(conn: Connection) -> EgressConfig:
     console.rule("Egress questions")
     lookback = _int("How many days of outbound_network history to analyse?", 30)
@@ -147,29 +198,9 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
     scope = _select("Policy scope?", POLICY_SCOPES, default="current_workspace")
     enable_rdap = _confirm("Look up the cloud owner of internet FQDNs?", True)
     block = _select("Block known-bad domains from a threat feed?", BLOCK_THREAT_DOMAINS, default="off")
-    feeds = list(DEFAULT_EGRESS_THREAT_FEEDS)
-    auth_key = None
-    allowlist = True
+    feeds, auth_key, allowlist = list(DEFAULT_EGRESS_THREAT_FEEDS), None, True
     if block != "off":
-        feeds = (
-            questionary.checkbox(
-                "Select domain block feeds (threatfox/urlhaus need an abuse.ch Auth-Key):",
-                choices=[
-                    questionary.Choice(f, checked=f in DEFAULT_EGRESS_THREAT_FEEDS)
-                    for f in EGRESS_THREAT_FEEDS
-                ],
-                style=_STYLE,
-            ).ask()
-            or list(DEFAULT_EGRESS_THREAT_FEEDS)
-        )
-        if any(f in ("threatfox", "urlhaus") for f in feeds):
-            auth_key = (
-                _text("abuse.ch Auth-Key (blank to skip those feeds; sign up at auth.abuse.ch)") or None
-            )
-        allowlist = _confirm(
-            "Flag block-candidates that are also on a popularity/allowlist (Tranco/MISP) for review?",
-            True,
-        )
+        feeds, auth_key, allowlist = resolve_threat_domain_feeds(interactive=True)
 
     apply = _apply_wizard(conn, scope, other="ingress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"

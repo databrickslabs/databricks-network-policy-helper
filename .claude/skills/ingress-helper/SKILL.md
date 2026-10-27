@@ -199,10 +199,13 @@ allow-list (in its own unscoped rule, and never dropped even when a threat feed 
 this only covers Databricks ranges **seen in your audit traffic** — the tool does not inject the full
 published range set, so confirm the platform's own ranges are covered before enforcing.
 
-`--threat-deny-rules` adds **deny rules** from the threat-intel table: `off`, `matched_only` (only
-threat CIDRs that matched observed traffic), or `all` (whole feeds). Over the cap it prioritises
-(confidence-1, attacker_subnet first) rather than skipping. If a policy would have deny rules but no
-allow rules, a catch-all allow is added so non-denied traffic is still permitted.
+`--block-threat-ips` adds **deny rules** from the threat-intel table: `off`, `matched_only` (only
+threat CIDRs that matched observed traffic), or `all` (whole feeds). When it's not `off`, an
+interactive run then asks which feeds to use (headless runs use all); the IP-side mirror of egress
+`--block-threat-domains`. Over the cap it prioritises (confidence-1, attacker_subnet first) rather
+than skipping. If a policy would have deny rules but no allow rules, a catch-all allow is added so
+non-denied traffic is still permitted. (Threat flagging of source IPs is always on, independent of
+this flag.)
 
 ## Feeds
 

@@ -13,6 +13,39 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-27
+
+### Changed
+
+- **The egress threat-domain block set is now risk-prioritised when it exceeds the 100-destination
+  cap.** Previously the block list was cut alphabetically (`sorted()[:100]`), so which domains
+  survived was arbitrary. It now keeps the highest-signal ones: domains **seen in your own traffic**
+  first, then higher-severity feeds (C2IntelFeeds C2 ahead of abuse.ch ThreatFox/URLhaus), with
+  **popularity-allowlisted** domains deprioritised (dropped first — they're the riskiest to block).
+  The truncation is still recorded so the interactive Y/N gate covers it, and the message points at
+  `--block-threat-domains matched_only` and feed selection to curate rather than truncate.
+- **Ingress and egress threat controls are now symmetric: one mode flag each, with interactive feed
+  selection.** The `ingress` flag `--threat-deny-rules` is **renamed to `--block-threat-ips`** (the
+  IP-side mirror of egress `--block-threat-domains`; same `off` / `matched_only` / `all` modes). When
+  it's not `off`, an interactive run then asks which threat-intel feeds to use. Known-bad source IPs
+  are still **always** flagged and kept out of the allow-list, independent of this flag. **Breaking:**
+  scripts using `--threat-deny-rules` must switch to `--block-threat-ips`.
+
+### Removed
+
+- **Collapsed the egress threat-domain flags into a single `--block-threat-domains`.** The granular
+  `--threat-feeds`, `--abuse-ch-auth-key`, `--domain-allowlist` / `--no-domain-allowlist`, and
+  `--domain-allowlist-feeds` flags are **removed from `egress`**. When `--block-threat-domains` is not
+  `off`, an interactive run now prompts for the feeds, the abuse.ch Auth-Key (only when a key-gated
+  feed is chosen), and the popularity-allowlist review. Non-interactive / `--yes` runs use the keyless
+  feeds plus the abuse.ch feeds when `DBX_NWP_ABUSE_CH_AUTH_KEY` is set, with the allowlist review on.
+  **Breaking:** scripts passing the removed flags must drop them and rely on `--block-threat-domains` +
+  `DBX_NWP_ABUSE_CH_AUTH_KEY`.
+- **Removed `--threat-feeds` from `ingress`.** Feeds are now selected interactively (a checkbox) when
+  `--block-threat-ips` is engaged; non-interactive / `--yes` runs use all feeds. This matches the
+  egress model. **Breaking:** scripts passing `ingress --threat-feeds` must drop it (feed choice is
+  interactive, or defaults to all headless).
+
 ## [0.7.0] - 2026-10-26
 
 ### Changed
@@ -217,7 +250,8 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.4.0...v0.5.0

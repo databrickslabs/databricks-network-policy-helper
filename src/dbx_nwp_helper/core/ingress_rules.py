@@ -354,8 +354,8 @@ def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note
             f"Threat-intel deny list has {total:,} CIDRs (> cap {MAX_DENY_CIDRS:,}) — prioritising: "
             f"kept confidence-1, attacker_subnet first, top {MAX_DENY_CIDRS:,}. "
             f"Including {len(selected):,} of {total:,}. To curate rather than truncate, use "
-            f"--threat-deny-rules matched_only (deny only CIDRs seen in your traffic) or narrow "
-            f"--threat-feeds."
+            f"--block-threat-ips matched_only (deny only CIDRs seen in your traffic) or select fewer "
+            f"feeds when prompted."
         )
     else:
         selected = sorted(all_records, key=_deny_sort_key)

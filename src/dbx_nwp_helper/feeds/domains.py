@@ -103,7 +103,7 @@ def load_block_domains(feeds: list[str], auth_key: str | None, note=lambda _m: N
             if not auth_key:
                 note(
                     f"'{feed}' is an abuse.ch feed that needs a free Auth-Key (https://auth.abuse.ch/) "
-                    "— pass --abuse-ch-auth-key or set DBX_NWP_ABUSE_CH_AUTH_KEY. Skipping it."
+                    "— enter it when prompted or set DBX_NWP_ABUSE_CH_AUTH_KEY. Skipping it."
                 )
                 continue
             hosts = _load_abusech_domains(feed, auth_key)
