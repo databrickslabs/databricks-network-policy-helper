@@ -800,6 +800,37 @@ def _pas_full_account(pas_id, *, level="ACCOUNT", endpoint_ids=None, pas_name=No
     return type("Acct", (), {"workspaces": _WS(), "private_access": _PA()})()
 
 
+def _cloud_account(cloud, raise_ws=False):
+    class _WS:
+        def get(self, workspace_id):
+            if raise_ws:
+                raise RuntimeError("no perms")
+            return type("W", (), {"cloud": cloud})()
+
+    return type("Acct", (), {"workspaces": _WS()})()
+
+
+def test_workspace_cloud_prefers_api_field_then_host():
+    assert (
+        acl_core.workspace_cloud(_cloud_account("azure"), 42, host="https://x.cloud.databricks.com")
+        == "azure"
+    )
+    assert acl_core.workspace_cloud(_cloud_account(" GCP "), 42) == "gcp"  # normalised
+    # empty API field → host fallback; read failure → host fallback; neither → None
+    assert acl_core.workspace_cloud(_cloud_account(""), 42, host="https://x.cloud.databricks.com") == "aws"
+    assert acl_core.workspace_cloud(_cloud_account(None), 42, host="https://x.gcp.databricks.com") == "gcp"
+    assert (
+        acl_core.workspace_cloud(
+            _cloud_account("", raise_ws=True), 42, host="https://a.b.azuredatabricks.net"
+        )
+        == "azure"
+    )
+    assert acl_core.workspace_cloud(_cloud_account(""), 42, host="https://example.com") is None
+    # an already-fetched workspace object is reused (no API call)
+    ws = type("W", (), {"cloud": "aws"})()
+    assert acl_core.workspace_cloud(_cloud_account("", raise_ws=True), 42, ws=ws) == "aws"
+
+
 def test_read_workspace_pas_statuses():
     # 'ok' when a PAS is attached, 'none' when not, 'error' when the account read fails.
     pas, status = acl_core.read_workspace_pas(_pas_full_account("pas-1"), 42)

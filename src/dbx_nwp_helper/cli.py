@@ -965,7 +965,9 @@ def _reconcile_existing_ingress(account, workspace_id, wc, cfg: IngressConfig, y
         - account-level (allow-all) PAS → CBI's allow-all default, EXCEPT it must never loosen an
           existing *restrictive* CBI private block — the stricter existing rules win (no abort).
       Azure never migrates PrivateLink (its `databricks_ui_api` endpoints are default-allowed), so it
-      only ever carries an existing CBI private block forward.
+      only ever carries an existing CBI private block forward. On an undetermined cloud a PAS is still
+      migrated when present, but the no-PAS → deny-all mapping (only known to hold on AWS/GCP) is not
+      applied blind — it warns instead.
     * **cross_workspace_access** — never built; any existing block is carried forward verbatim.
     * **public_access** — built net-new from traffic/ACLs; an existing restrictive public is carried
       forward only when this run has nothing of its own to build (resolved in ingress_rules).
@@ -981,16 +983,17 @@ def _reconcile_existing_ingress(account, workspace_id, wc, cfg: IngressConfig, y
     migrating_restrictive_private, assigned_id) for the conflict gate. Needs an account client; a
     no-op (all None/False) without one."""
     from .core import acl as acl_core
-    from .core import egress as eg
     from .core import policy as policy_core
 
     if account is None:
         return None, None, False, None  # can't read the PAS / assigned policy without account creds
-    cloud = eg.workspace_cloud_from_host(getattr(getattr(wc, "config", None), "host", None))
+    host = getattr(getattr(wc, "config", None), "host", None)
+    cloud = acl_core.workspace_cloud(account, workspace_id, host=host)
 
-    # Legacy private access plan (AWS/GCP only — Azure has no PAS, and nothing to migrate).
+    # Legacy private access plan. Azure has no PAS and nothing to migrate; everywhere else read the
+    # PAS, and on AWS/GCP treat "no PAS" as deny-all private.
     plan = None
-    if cloud in ("aws", "gcp"):
+    if cloud != "azure":
         pas, status = acl_core.read_workspace_pas(account, workspace_id)
         if status == "error":
             console.banner(
@@ -1000,8 +1003,18 @@ def _reconcile_existing_ingress(account, workspace_id, wc, cfg: IngressConfig, y
             )
         elif status == "ok":
             plan = acl_core.plan_from_pas(pas)
-        else:  # 'none': no PAS attached → legacy private access = no endpoints (deny-all private)
+        elif cloud in ("aws", "gcp"):
+            # 'none': no PAS attached → legacy private access = no endpoints (deny-all private)
             plan = acl_core.plan_without_pas()
+        else:
+            # 'none' on a cloud we couldn't determine: the no-PAS → deny-all mapping is only known to
+            # hold on AWS/GCP, so don't apply it blind.
+            console.banner(
+                "warn",
+                "Couldn't determine this workspace's cloud and it has no Private Access Settings "
+                "attached — private access is NOT migrated (on AWS/GCP that would be a deny-all private "
+                "block). Verify the generated policy's private access before relying on it.",
+            )
 
     # Existing assigned CBI policy's (restrictive-only, deep-copied) ingress sub-blocks + their mode.
     assigned_id, existing_public, existing_private, existing_xws, existing_mode = acl_core.existing_cbi_state(

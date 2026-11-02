@@ -31,6 +31,9 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
     API, so it has no place in a CBI private_access rule.
   - An account-level (allow-all) PAS over an existing restrictive CBI private block still keeps the
     stricter existing block (no abort) — unchanged, now documented as the agreed behaviour.
+  - The workspace's cloud is now taken from the account API's `cloud` field first, falling back to
+    the host domain (as `dbx-migrate-ip-acls` does). On an undetermined cloud a PAS is still migrated
+    when present, but the no-PAS → deny-all mapping is not applied blind — the run warns instead.
 - **The generated ingress policy inherits the existing CBI policy's enforcement mode.** When the
   workspace's assigned policy already has restrictive public **or** private (or cross-workspace)
   rules, those rules are carried forward, so the generated policy now runs in **that policy's mode**

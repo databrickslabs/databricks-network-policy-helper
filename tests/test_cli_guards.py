@@ -959,6 +959,69 @@ def test_reconcile_existing_ingress_no_pas_keeps_backend_rest_endpoint(monkeypat
     assert rules[0]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-rest"]
 
 
+def test_reconcile_existing_ingress_unknown_cloud_no_pas_does_not_write_private(monkeypatch):
+    # The no-PAS → deny-all mapping is only known to hold on AWS/GCP: on an undetermined cloud with no
+    # PAS, warn and leave private access alone (no restrictive block, nothing to conflict).
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.read_workspace_pas", lambda a, w: (None, "none"))
+    monkeypatch.setattr(
+        "dbx_nwp_helper.core.acl.existing_cbi_state", lambda a, w: ("p1", None, None, None, None)
+    )
+    cfg = IngressConfig()
+    _pub, _priv, migrating_private, _id = cli._reconcile_existing_ingress(
+        object(), 42, _wc("https://workspace.example.com"), cfg, yes=True
+    )
+    assert migrating_private is False
+    assert cfg.private_access is None
+
+
+def test_reconcile_existing_ingress_unknown_cloud_still_migrates_pas(monkeypatch):
+    # An undetermined cloud still reads the PAS and migrates it when present.
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr(
+        "dbx_nwp_helper.core.acl.read_workspace_pas",
+        lambda a, w: (_fake_pas("ENDPOINT", ids=["vpce-a"]), "ok"),
+    )
+    monkeypatch.setattr(
+        "dbx_nwp_helper.core.acl.existing_cbi_state", lambda a, w: ("p1", None, None, None, None)
+    )
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.backend_private_endpoint_ids", lambda a, w: [])
+    cfg = IngressConfig()
+    _pub, _priv, migrating_private, _id = cli._reconcile_existing_ingress(
+        object(), 42, _wc("https://workspace.example.com"), cfg, yes=True
+    )
+    assert migrating_private is True
+    assert cfg.private_access.as_dict()["allow_rules"][0]["label"] == "Inbound private endpoints"
+
+
+def test_reconcile_existing_ingress_uses_api_cloud_field_over_host(monkeypatch):
+    # The account API's `cloud` field wins over the host domain: an AWS-looking host on a workspace
+    # the API says is Azure must NOT read the PAS or write a deny-all private block.
+    from dbx_nwp_helper.config import IngressConfig
+
+    seen = {"pas_read": False}
+
+    def _read(a, w):
+        seen["pas_read"] = True
+        return None, "none"
+
+    class _WS:
+        def get(self, workspace_id):
+            return type("W", (), {"cloud": "azure"})()
+
+    account = type("Acct", (), {"workspaces": _WS()})()
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.read_workspace_pas", _read)
+    monkeypatch.setattr(
+        "dbx_nwp_helper.core.acl.existing_cbi_state", lambda a, w: ("p1", None, None, None, None)
+    )
+    cfg = IngressConfig()
+    cli._reconcile_existing_ingress(account, 42, _wc("https://dbc-x.cloud.databricks.com"), cfg, yes=True)
+    assert seen["pas_read"] is False
+    assert cfg.private_access is None
+
+
 def test_reconcile_existing_ingress_pas_read_error_does_not_write_private(monkeypatch):
     # An unreadable PAS must NOT be mistaken for "no PAS" — no deny-all block is written.
     from dbx_nwp_helper.config import IngressConfig

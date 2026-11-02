@@ -47,6 +47,27 @@ class PrivateAccessPlan:
     backend_endpoint_ids: list[str] = field(default_factory=list)
 
 
+def workspace_cloud(account, workspace_id, host: str | None = None, ws: object | None = None) -> str | None:
+    """This workspace's cloud — 'aws', 'azure', or 'gcp'. Prefers the authoritative `cloud` field on
+    the account workspaces API; when that's empty (it frequently is — e.g. AWS workspaces report no
+    cloud), falls back to inferring it from the workspace `host` URL's domain. None if neither yields
+    an answer. Drives the per-cloud private access handling (Azure: nothing to migrate; AWS/GCP: no
+    PAS = deny-all private; unknown: don't apply the no-PAS mapping blind). Pass `ws` to reuse an
+    already-fetched workspace object. Best-effort — a read failure degrades to the host fallback
+    rather than crashing. Mirrors `databricks-migrate-ip-acls`."""
+    from .egress import workspace_cloud_from_host
+
+    try:
+        if ws is None:
+            ws = account.workspaces.get(workspace_id=int(workspace_id))
+        cloud = (getattr(ws, "cloud", None) or "").strip().lower()
+        if cloud:
+            return cloud
+    except Exception:  # noqa: BLE001 - couldn't read the API field; fall back to the host below
+        pass
+    return workspace_cloud_from_host(host)
+
+
 def read_workspace_pas(account, workspace_id, ws: object | None = None) -> tuple[object | None, str]:
     """Fetch the workspace's Private Access Settings (PAS) object — the source of truth for AWS/GCP
     front-end PrivateLink. Returns (pas, status) where status is:
