@@ -29,8 +29,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/andyweaves/databricks-network-policy-helper"
-Repository = "https://github.com/andyweaves/databricks-network-policy-helper"
+Homepage = "https://github.com/databrickslabs/databricks-network-policy-helper"
+Repository = "https://github.com/databrickslabs/databricks-network-policy-helper"
 
 [project.scripts]
 dbx-nwp-helper = "dbx_nwp_helper.cli:app"

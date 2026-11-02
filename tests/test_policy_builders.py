@@ -160,7 +160,9 @@ def test_build_private_access_restricted_includes_backend_endpoints():
     # A RESTRICTED_ACCESS private block gates ALL private ingress, so the workspace's back-end
     # PrivateLink endpoints (relay + REST — not in the PAS) must ride alongside the front-end ones.
     blk = policy.build_private_access_block(
-        "RESTRICTED_ACCESS", ["vpce-frontend"], label="corp-pas",
+        "RESTRICTED_ACCESS",
+        ["vpce-frontend"],
+        label="corp-pas",
         backend_endpoint_ids=["vpce-relay", "vpce-rest"],
     ).as_dict()
     rules = blk["allow_rules"]
@@ -173,7 +175,9 @@ def test_build_private_access_restricted_includes_backend_endpoints():
 def test_build_private_access_backend_deduped_against_frontend():
     # a shared endpoint (in both the PAS and the network config) isn't listed twice
     blk = policy.build_private_access_block(
-        "RESTRICTED_ACCESS", ["vpce-shared"], label="pas",
+        "RESTRICTED_ACCESS",
+        ["vpce-shared"],
+        label="pas",
         backend_endpoint_ids=["vpce-shared", "vpce-relay"],
     ).as_dict()
     assert blk["allow_rules"][1]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-relay"]  # shared dropped

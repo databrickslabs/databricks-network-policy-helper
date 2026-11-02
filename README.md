@@ -1,12 +1,12 @@
 # 🛡️ Databricks Network Policy Helper
 
-[![CI](https://github.com/andyweaves/databricks-network-policy-helper/actions/workflows/ci.yml/badge.svg)](https://github.com/andyweaves/databricks-network-policy-helper/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/andyweaves/databricks-network-policy-helper/branch/main/graph/badge.svg)](https://codecov.io/gh/andyweaves/databricks-network-policy-helper)
+[![CI](https://github.com/databrickslabs/databricks-network-policy-helper/actions/workflows/ci.yml/badge.svg)](https://github.com/databrickslabs/databricks-network-policy-helper/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/databrickslabs/databricks-network-policy-helper/branch/main/graph/badge.svg)](https://codecov.io/gh/databrickslabs/databricks-network-policy-helper)
 
 > Build Databricks **account network policies** from *real observed traffic* — not guesswork.
 > 
 > 💡 **Migrating an existing IP access list** into a CBI policy, verbatim (no traffic analysis)? That lives in its own focused tool:
-> **[databricks-migrate-ip-acls](https://github.com/andyweaves/databricks-migrate-ip-acls)**
+> **[databricks-migrate-ip-acls](https://github.com/databrickslabs/migrate-ip-acls)**
 > (`dbx-migrate-ip-acls`)
 
 `dbx-nwp-helper` is a visually engaging CLI that turns the Databricks system tables into proposed
