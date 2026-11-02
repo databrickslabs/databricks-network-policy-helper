@@ -129,9 +129,13 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
 
     apply = _apply_wizard(conn, scope, other="egress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
+    # Only offer to disable the legacy IP access lists when the run creates + assigns an ENFORCED
+    # policy — with a dry-run (log-only) policy that would leave the workspace unprotected
+    # (validate_disable_ip_acls rejects the combination).
     disable_acls = (
         apply.create_policy
         and apply.auto_assign
+        and mode == "enforce"
         and _confirm(
             "Disable the workspace's existing IP access lists after applying? "
             "(the new CBI policy replaces them)",

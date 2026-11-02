@@ -16,39 +16,47 @@ import copy
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from .policy import INBOUND_PRIVATE_LABEL
+
 Note = Callable[[str], None]
 
 
 @dataclass
 class PrivateAccessPlan:
-    """A workspace's front-end PrivateLink (its Private Access Settings) mapped to a CBI
-    `private_access` block, so AWS/GCP PrivateLink can be recreated when building a CBI policy:
-      * private_access_level=ACCOUNT  -> ALLOW_ALL_REGISTERED_ENDPOINTS (any registered endpoint);
-      * private_access_level=ENDPOINT -> RESTRICTED_ACCESS listing the PAS's allowed endpoint ids.
-    The label is the PAS name verbatim when it has one, else a generic fallback."""
+    """A workspace's legacy private access posture (AWS/GCP) mapped to a CBI `private_access` block,
+    so it can be recreated faithfully when building a CBI policy:
+      * PAS private_access_level=ACCOUNT  -> ALLOW_ALL_REGISTERED_ENDPOINTS (any registered endpoint);
+      * PAS private_access_level=ENDPOINT -> RESTRICTED_ACCESS listing the PAS's allowed endpoint ids;
+      * NO PAS attached                   -> RESTRICTED_ACCESS with no front-end endpoints: on AWS/GCP a
+        workspace without a PAS accepts no private endpoints today, so "no PAS" is private access =
+        no endpoints — not "nothing to migrate" (see plan_without_pas).
+    The allow rule carries the fixed label "Inbound private endpoints"."""
 
     restriction_mode: str  # "ALLOW_ALL_REGISTERED_ENDPOINTS" | "RESTRICTED_ACCESS"
     endpoint_ids: list[str] = field(default_factory=list)
-    label: str = "registered-private-endpoints"
-    source_pas_id: str | None = None
-    # The workspace's back-end PrivateLink endpoint ids (data-plane SCC relay + REST), read from its
-    # network configuration — NOT the PAS (which only governs front-end/inbound). A RESTRICTED_ACCESS
-    # private block gates ALL private ingress, so these must be allowed alongside the PAS front-end
-    # endpoints or the data plane is blocked. Empty when the workspace has no back-end PrivateLink
-    # (e.g. front-end PrivateLink only, with back-end egressing via the compute-plane NAT gateway).
-    # Only populated/relevant for a RESTRICTED_ACCESS plan.
+    label: str = INBOUND_PRIVATE_LABEL
+    source_pas_id: str | None = None  # None for the no-PAS plan
+    # The workspace's back-end PrivateLink REST API endpoint id(s), read from its network
+    # configuration — NOT the PAS (which only governs front-end/inbound). Legacy allowed endpoints are
+    # (PAS endpoints OR the network config's REST API endpoint), and a RESTRICTED_ACCESS private block
+    # gates ALL private ingress, so the REST endpoint must be allowed alongside the PAS front-end
+    # endpoints or classic compute is blocked. The SCC relay endpoint is NOT included (it doesn't
+    # reach the workspace REST API). Empty when the workspace has no back-end PrivateLink (e.g.
+    # front-end PrivateLink only, with back-end egressing via the compute-plane NAT gateway). Only
+    # populated/relevant for a RESTRICTED_ACCESS plan.
     backend_endpoint_ids: list[str] = field(default_factory=list)
 
 
 def read_workspace_pas(account, workspace_id, ws: object | None = None) -> tuple[object | None, str]:
     """Fetch the workspace's Private Access Settings (PAS) object — the source of truth for AWS/GCP
     front-end PrivateLink. Returns (pas, status) where status is:
-      * 'none'  — no PAS attached (no front-end PrivateLink; migrate public only);
+      * 'none'  — no PAS attached (on AWS/GCP that means private access = no endpoints; see
+                  plan_without_pas);
       * 'ok'    — PAS read (`pas` is the object to map into a private_access block);
       * 'error' — the account read failed (caller warns; PrivateLink can't be migrated).
-    Separating 'none' from 'error' matters: a workspace with genuinely no PrivateLink migrates
-    cleanly, while an unreadable account warns rather than silently dropping a private rule. Pass `ws`
-    to reuse an already-fetched workspace object. Best-effort."""
+    Separating 'none' from 'error' matters: a workspace with genuinely no PAS gets a faithful
+    deny-all private block, while an unreadable account warns rather than silently writing one. Pass
+    `ws` to reuse an already-fetched workspace object. Best-effort."""
     try:
         if ws is None:
             ws = account.workspaces.get(workspace_id=int(workspace_id))
@@ -66,34 +74,43 @@ def read_workspace_pas(account, workspace_id, ws: object | None = None) -> tuple
 def plan_from_pas(pas) -> PrivateAccessPlan:
     """Map a Private Access Settings object to a PrivateAccessPlan (the CBI private_access block to
     build): ACCOUNT level -> allow-all-registered; ENDPOINT level -> the enumerated allowed endpoint
-    ids, with the PAS name kept as the rule label verbatim."""
+    ids under the fixed "Inbound private endpoints" label."""
     level = getattr(pas, "private_access_level", None)
     level_val = str(getattr(level, "value", level) or "").upper()
     pas_id = getattr(pas, "private_access_settings_id", None)
-    label = getattr(pas, "private_access_settings_name", None) or "registered-private-endpoints"
     if level_val == "ENDPOINT":
         ids = list(getattr(pas, "allowed_vpc_endpoint_ids", None) or [])
-        return PrivateAccessPlan(
-            restriction_mode="RESTRICTED_ACCESS", endpoint_ids=ids, label=label, source_pas_id=pas_id
-        )
+        return PrivateAccessPlan(restriction_mode="RESTRICTED_ACCESS", endpoint_ids=ids, source_pas_id=pas_id)
     # ACCOUNT (or an unspecified level) means any endpoint registered in the account is accepted.
-    return PrivateAccessPlan(
-        restriction_mode="ALLOW_ALL_REGISTERED_ENDPOINTS", label=label, source_pas_id=pas_id
-    )
+    return PrivateAccessPlan(restriction_mode="ALLOW_ALL_REGISTERED_ENDPOINTS", source_pas_id=pas_id)
+
+
+def plan_without_pas() -> PrivateAccessPlan:
+    """The PrivateAccessPlan for an AWS/GCP workspace with NO Private Access Settings attached. Such a
+    workspace accepts no front-end private endpoints today, so the faithful CBI equivalent is a
+    RESTRICTED_ACCESS private_access block with no front-end allow rule (deny-all private) — plus the
+    back-end REST API endpoint rule if the network config has one (the caller fills
+    backend_endpoint_ids). It is NOT "nothing to migrate": leaving private_access at the CBI default
+    (allow all registered endpoints) would loosen the workspace's posture once CBI is the source of
+    truth for private access."""
+    return PrivateAccessPlan(restriction_mode="RESTRICTED_ACCESS", endpoint_ids=[], source_pas_id=None)
 
 
 def backend_private_endpoint_ids(account, workspace_id, ws: object | None = None) -> list[str]:
-    """The workspace's back-end PrivateLink endpoint ids — the data-plane SCC relay + REST endpoints
+    """The workspace's back-end PrivateLink REST API endpoint id(s) — the `rest_api` endpoints
     registered in its network configuration (`network.vpc_endpoints`: AWS VPC endpoints / GCP PSC
     endpoints). Unlike the front-end endpoints, these live in the network config, NOT the Private
-    Access Settings (the PAS only governs front-end/inbound). A RESTRICTED_ACCESS CBI private block
-    gates ALL private ingress, so a block built only from the PAS would block the data plane — these
-    must be allowed alongside the PAS front-end endpoints.
+    Access Settings (the PAS only governs front-end/inbound). Legacy allowed endpoints are (PAS
+    endpoints OR the network config's REST API endpoint), and a RESTRICTED_ACCESS CBI private block
+    gates ALL private ingress, so a block built only from the PAS would block classic compute — the
+    REST endpoint must be allowed alongside the PAS front-end endpoints. The data-plane SCC relay
+    endpoint (`dataplane_relay`) is deliberately ignored: it doesn't carry ingress to the workspace's
+    REST API, so it has no place in a CBI private_access rule.
 
-    Returns the deduped registered endpoint ids (relay first, then REST), or [] when the workspace
-    has no back-end PrivateLink (e.g. front-end PrivateLink only, with back-end reaching the control
-    plane via the compute-plane NAT gateway) or the read fails. Pass `ws` to reuse an already-fetched
-    workspace object. Best-effort — a read failure degrades to [] rather than crashing."""
+    Returns the deduped REST API endpoint ids, or [] when the workspace has no back-end PrivateLink
+    (e.g. front-end PrivateLink only, with back-end reaching the control plane via the compute-plane
+    NAT gateway) or the read fails. Pass `ws` to reuse an already-fetched workspace object.
+    Best-effort — a read failure degrades to [] rather than crashing."""
     try:
         if ws is None:
             ws = account.workspaces.get(workspace_id=int(workspace_id))
@@ -109,10 +126,8 @@ def backend_private_endpoint_ids(account, workspace_id, ws: object | None = None
     vpce = getattr(network, "vpc_endpoints", None)
     if vpce is None:
         return []
-    relay = list(getattr(vpce, "dataplane_relay", None) or [])
-    rest = list(getattr(vpce, "rest_api", None) or [])
     out: list[str] = []
-    for ep in relay + rest:
+    for ep in list(getattr(vpce, "rest_api", None) or []):
         if ep and ep not in out:
             out.append(ep)
     return out
@@ -164,35 +179,41 @@ def _ingress_restrictive(ingress) -> bool:
     return public_restrictive(ingress) or private_or_xws_restrictive(ingress)
 
 
-def _active_ingress(pol):
-    """The ingress block that carries a policy's rules — prefer a *restrictive* enforced `ingress`,
-    then a restrictive `ingress_dry_run` (a policy has one enforcement mode, so its rules live in one
-    or the other), else whichever is present. None if neither is."""
+def _active_ingress(pol) -> tuple[object | None, str | None]:
+    """(block, mode) for the ingress block that carries a policy's rules — prefer a *restrictive*
+    enforced `ingress` (mode "enforce"), then a restrictive `ingress_dry_run` (mode "dry_run"); a
+    policy has one enforcement mode, so its rules live in one or the other. Falls back to whichever
+    block is present with mode None (nothing restrictive → no mode to inherit). (None, None) if
+    neither is present."""
     ing = getattr(pol, "ingress", None)
     if ing is not None and _ingress_restrictive(ing):
-        return ing
+        return ing, "enforce"
     dry = getattr(pol, "ingress_dry_run", None)
     if dry is not None and _ingress_restrictive(dry):
-        return dry
-    return ing if ing is not None else dry
+        return dry, "dry_run"
+    return (ing if ing is not None else dry), None
 
 
-def existing_cbi_ingress(
+def existing_cbi_state(
     account, workspace_id
-) -> tuple[str | None, object | None, object | None, object | None]:
+) -> tuple[str | None, object | None, object | None, object | None, str | None]:
     """The workspace's currently-assigned CBI policy's ingress sub-blocks, deep-copied so they can be
-    carried verbatim into the generated policy for any dimension this run doesn't itself produce.
-    Returns (assigned_policy_id, public_access, private_access, cross_workspace_access); (id, None,
-    None, None) when nothing is assigned / unreadable. Only *restrictive* sub-blocks are returned —
-    a permissive one (FULL_ACCESS / ALLOW_ALL_REGISTERED_ENDPOINTS, e.g. the baseline default-policy)
-    is equivalent to omitting it, so dropping it keeps the generated policy clean and never silently
-    re-adds an allow-all block. Best-effort."""
+    carried verbatim into the generated policy for any dimension this run doesn't itself produce,
+    plus the enforcement mode those rules currently run in. Returns (assigned_policy_id,
+    public_access, private_access, cross_workspace_access, mode); (id, None, None, None, None) when
+    nothing is assigned / unreadable / nothing restrictive. Only *restrictive* sub-blocks are
+    returned — a permissive one (FULL_ACCESS / ALLOW_ALL_REGISTERED_ENDPOINTS, e.g. the baseline
+    default-policy) is equivalent to omitting it, so dropping it keeps the generated policy clean and
+    never silently re-adds an allow-all block. `mode` is "enforce" / "dry_run" when the assigned
+    policy has a restrictive ingress block (the mode the generated policy must inherit, so carrying
+    those rules forward never silently promotes dry-run rules to blocking or demotes enforced ones to
+    log-only), else None. Best-effort."""
     policy_id, pol = assigned_policy(account, workspace_id)
     if pol is None:
-        return policy_id, None, None, None
-    ing = _active_ingress(pol)
+        return policy_id, None, None, None, None
+    ing, mode = _active_ingress(pol)
     if ing is None:
-        return policy_id, None, None, None
+        return policy_id, None, None, None, None
     pub = getattr(ing, "public_access", None)
     priv = getattr(ing, "private_access", None)
     xws = getattr(ing, "cross_workspace_access", None)
@@ -201,7 +222,16 @@ def existing_cbi_ingress(
         copy.deepcopy(pub) if _block_restrictive(pub) else None,
         copy.deepcopy(priv) if _block_restrictive(priv) else None,
         copy.deepcopy(xws) if _block_restrictive(xws) else None,
+        mode,
     )
+
+
+def existing_cbi_ingress(
+    account, workspace_id
+) -> tuple[str | None, object | None, object | None, object | None]:
+    """existing_cbi_state() without the mode — (assigned_policy_id, public_access, private_access,
+    cross_workspace_access)."""
+    return existing_cbi_state(account, workspace_id)[:4]
 
 
 def egress_restrictive(egress) -> bool:

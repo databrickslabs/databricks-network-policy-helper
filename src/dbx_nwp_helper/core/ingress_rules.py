@@ -373,7 +373,8 @@ def _ingress_block(allow, deny, cfg: IngressConfig, note: Note = lambda _m: None
     all emit the same shape:
       * public — built net-new from this target's observed-traffic + IP-ACL specs; when there are
         none, an existing restrictive CBI public_access is carried forward (cfg.existing_public);
-      * private — a migrated non-allow-all PAS or an existing private_access carried forward
+      * private — the migrated legacy private posture (PAS / no PAS / back-end REST) or an existing
+        private_access carried forward
         (cfg.private_access);
       * cross-workspace — never built, always carried forward verbatim (cfg.existing_xws)."""
     if allow or deny:

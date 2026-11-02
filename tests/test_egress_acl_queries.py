@@ -818,7 +818,7 @@ def test_plan_from_pas_account_level():
     assert plan.source_pas_id == "pas-1"
 
 
-def test_plan_from_pas_endpoint_level_keeps_ids_and_name_label():
+def test_plan_from_pas_endpoint_level_keeps_ids_with_fixed_label():
     pas, _ = acl_core.read_workspace_pas(
         _pas_full_account("pas-2", level="ENDPOINT", endpoint_ids=["vpce-a", "vpce-b"], pas_name="prod-pas"),
         42,
@@ -826,7 +826,16 @@ def test_plan_from_pas_endpoint_level_keeps_ids_and_name_label():
     plan = acl_core.plan_from_pas(pas)
     assert plan.restriction_mode == "RESTRICTED_ACCESS"
     assert plan.endpoint_ids == ["vpce-a", "vpce-b"]
-    assert plan.label == "prod-pas"  # PAS name kept verbatim as the rule label
+    assert plan.label == "Inbound private endpoints"  # fixed agreed label, not the PAS name
+
+
+def test_plan_without_pas_is_restricted_with_no_endpoints():
+    # No PAS on AWS/GCP = private access with no endpoints: a deny-all private block, not allow-all.
+    plan = acl_core.plan_without_pas()
+    assert plan.restriction_mode == "RESTRICTED_ACCESS"
+    assert plan.endpoint_ids == []
+    assert plan.source_pas_id is None
+    assert plan.backend_endpoint_ids == []
 
 
 def _network_account(network_id="net-1", relay=None, rest=None, ws_raises=False, net_raises=False):
@@ -849,14 +858,19 @@ def _network_account(network_id="net-1", relay=None, rest=None, ws_raises=False,
     return type("Acct", (), {"workspaces": _WS(), "networks": _Networks()})()
 
 
-def test_backend_private_endpoint_ids_reads_relay_and_rest():
+def test_backend_private_endpoint_ids_reads_rest_only_ignoring_relay():
+    # Only the REST API endpoint carries ingress to the workspace; the SCC relay endpoint is ignored.
     acct = _network_account(relay=["vpce-relay"], rest=["vpce-rest"])
-    assert acl_core.backend_private_endpoint_ids(acct, 1) == ["vpce-relay", "vpce-rest"]
+    assert acl_core.backend_private_endpoint_ids(acct, 1) == ["vpce-rest"]
+
+
+def test_backend_private_endpoint_ids_relay_only_is_empty():
+    assert acl_core.backend_private_endpoint_ids(_network_account(relay=["vpce-relay"], rest=None), 1) == []
 
 
 def test_backend_private_endpoint_ids_dedupes_preserving_order():
-    acct = _network_account(relay=["vpce-a", "vpce-b"], rest=["vpce-b", "vpce-c"])
-    assert acl_core.backend_private_endpoint_ids(acct, 1) == ["vpce-a", "vpce-b", "vpce-c"]
+    acct = _network_account(rest=["vpce-b", "vpce-c", "vpce-b", ""])
+    assert acl_core.backend_private_endpoint_ids(acct, 1) == ["vpce-b", "vpce-c"]
 
 
 def test_backend_private_endpoint_ids_no_network_is_empty():
@@ -912,6 +926,43 @@ def test_existing_cbi_ingress_copies_restrictive_subblocks_only():
     assert pub is not None  # restrictive public carried
     assert priv is None  # permissive private dropped
     assert xws is not None  # restrictive cross-workspace carried
+
+
+def test_existing_cbi_state_reports_mode_of_restrictive_block(monkeypatch):
+    # The mode comes from whichever block carries the restrictive rules: `ingress` → enforce,
+    # `ingress_dry_run` → dry_run; nothing restrictive → None (nothing to inherit).
+    import types
+
+    def _blk(mode, rules=None):
+        return types.SimpleNamespace(
+            restriction_mode=types.SimpleNamespace(value=mode), allow_rules=rules, deny_rules=None
+        )
+
+    def _ing(public_mode="FULL_ACCESS", rules=None):
+        return types.SimpleNamespace(
+            public_access=_blk(public_mode, rules),
+            private_access=_blk("ALLOW_ALL_REGISTERED_ENDPOINTS"),
+            cross_workspace_access=_blk("LEGACY_MODE"),
+        )
+
+    restrictive = _ing("RESTRICTED_ACCESS", [object()])
+    permissive = _ing()
+
+    cases = [
+        (types.SimpleNamespace(ingress=restrictive, ingress_dry_run=None), "enforce"),
+        (types.SimpleNamespace(ingress=None, ingress_dry_run=restrictive), "dry_run"),
+        (types.SimpleNamespace(ingress=permissive, ingress_dry_run=None), None),
+        (types.SimpleNamespace(ingress=None, ingress_dry_run=permissive), None),
+    ]
+    for pol, want in cases:
+        monkeypatch.setattr(acl_core, "assigned_policy", lambda a, w, pol=pol: ("p1", pol))
+        pid, pub, _priv, _xws, mode = acl_core.existing_cbi_state(object(), 42)
+        assert pid == "p1"
+        assert mode == want
+        assert (pub is not None) == (want is not None)
+    # the 4-tuple wrapper still works for callers that don't need the mode
+    monkeypatch.setattr(acl_core, "assigned_policy", lambda a, w: ("p1", cases[0][0]))
+    assert len(acl_core.existing_cbi_ingress(object(), 42)) == 4
 
 
 def _policy_account(assigned_policy_id, policy_obj):

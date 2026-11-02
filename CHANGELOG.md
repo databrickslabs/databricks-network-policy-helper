@@ -13,6 +13,41 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+### Changed
+
+- **Ingress private access now mirrors `dbx-migrate-ip-acls` exactly (AWS/GCP).** The workspace's
+  legacy private access posture is recreated faithfully in the generated policy's `private_access`:
+  - **No PAS attached is now "private access = no endpoints", not "nothing to migrate".** A no-PAS
+    workspace accepts no private endpoints today, so the policy gets a `RESTRICTED_ACCESS` private
+    block with no front-end allow rule (deny-all private) instead of being left at CBI's allow-all
+    default — which would have loosened the posture once CBI is the source of truth for private
+    access. Like an endpoint-scoped PAS, it counts as migrating restrictive private for the
+    create-and-assign conflict gate (abort over an existing restrictive CBI private block).
+  - **Rule names are now fixed.** The PAS-migrated rule is labelled **"Inbound private endpoints"**
+    (previously the PAS name verbatim) and the back-end rule **"Classic compute REST API endpoint"**
+    (previously "back-end PrivateLink (data-plane relay + REST)").
+  - **The back-end rule carries only the REST API endpoint.** The network config's secure cluster
+    connectivity relay endpoint is no longer added — it doesn't carry ingress to the workspace's REST
+    API, so it has no place in a CBI private_access rule.
+  - An account-level (allow-all) PAS over an existing restrictive CBI private block still keeps the
+    stricter existing block (no abort) — unchanged, now documented as the agreed behaviour.
+- **The generated ingress policy inherits the existing CBI policy's enforcement mode.** When the
+  workspace's assigned policy already has restrictive public **or** private (or cross-workspace)
+  rules, those rules are carried forward, so the generated policy now runs in **that policy's mode**
+  and `--policy-mode` is ignored with a warning — previously an enforced block carried into a
+  `dry_run` run was silently demoted to log-only (and a dry-run block carried into an `enforce` run
+  silently started blocking). Under an inherited dry-run, `--disable-existing-ip-acls` is ignored
+  with a warning (the legacy IP access lists can't be turned off while the only policy is log-only).
+  When nothing restrictive is assigned, `--policy-mode` applies as before.
+
+### Fixed
+
+- **`--disable-existing-ip-acls` is now rejected with `--policy-mode dry_run`.** It was only gated on
+  `--create-policy` + `--auto-assign`, so a dry-run run could turn off the workspace's IP access lists
+  and leave it with a log-only policy and no enforced ingress control. The flag now also requires
+  `--policy-mode enforce` (matching `dbx-migrate-ip-acls`); the guided wizard only offers it for an
+  enforced policy.
+
 ## [0.8.1] - 2026-10-27
 
 ### Fixed

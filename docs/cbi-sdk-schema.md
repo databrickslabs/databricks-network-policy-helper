@@ -38,14 +38,19 @@ CustomerFacingIngressNetworkPolicyPrivateAccess          # front-end PrivateLink
     PrivateRequestOrigin ├── all_registered_endpoints: bool   # any endpoint registered to the account
                          ├── endpoints: Endpoints(endpoint_ids: [str])   # specific registered endpoints
                          ├── all_private_access / azure_workspace_private_link: bool   # deny-rule only
-    # AWS/GCP migration (core/policy.build_private_access_block): a non-allow-all PAS (level ENDPOINT)
-    # -> RESTRICTED_ACCESS with endpoints=allowed_vpc_endpoint_ids (mapped across as-is; the PAS name
-    # is kept as the rule label). An allow-all (ACCOUNT) PAS needs no migration (CBI defaults to
-    # allowing all registered endpoints) and never loosens a stricter existing private block. Azure
-    # does NOT migrate front-end PrivateLink. Public, private and cross-workspace are independent
-    # dimensions: each is built/migrated or carried forward from the assigned policy's restrictive
-    # blocks (acl.existing_cbi_ingress), composed via policy.assemble_ingress. Cross-workspace is
-    # never built — always carried forward.
+    # AWS/GCP migration (core/policy.build_private_access_block): an endpoint-scoped PAS (level
+    # ENDPOINT) -> RESTRICTED_ACCESS with an "Inbound private endpoints" rule listing
+    # allowed_vpc_endpoint_ids (mapped across as-is); NO PAS -> RESTRICTED_ACCESS with no front-end
+    # rule (deny-all private: a no-PAS workspace accepts no private endpoints; acl.plan_without_pas);
+    # either way plus a "Classic compute REST API endpoint" rule for the network config's back-end
+    # rest_api endpoint(s) (acl.backend_private_endpoint_ids — the SCC relay is NOT included). An
+    # allow-all (ACCOUNT) PAS needs no migration (CBI defaults to allowing all registered endpoints)
+    # and never loosens a stricter existing private block. Azure does NOT migrate front-end
+    # PrivateLink. Public, private and cross-workspace are independent dimensions: each is
+    # built/migrated or carried forward from the assigned policy's restrictive blocks
+    # (acl.existing_cbi_state, which also reports the mode those rules run in — inherited by the
+    # generated policy), composed via policy.assemble_ingress. Cross-workspace is never built —
+    # always carried forward.
 
 CustomerFacingIngressNetworkPolicyCrossWorkspaceAccess   # serverless workspace→workspace ingress
 ├── restriction_mode: {FULL_ACCESS | LEGACY_MODE | RESTRICTED_ACCESS}   # LEGACY_MODE = "compatibility"
