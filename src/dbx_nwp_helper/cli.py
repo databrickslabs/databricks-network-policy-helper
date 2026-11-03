@@ -445,9 +445,16 @@ def _client_or_exit(build, profile: str | None, flag: str, on_config_error=None)
     `on_config_error(e, profile, flag)` is the terminal handler for a non-reauthable ValueError; it
     defaults to `_profile_config_error`. The account path passes its own so a no-account-credentials
     failure gets account-admin guidance instead of the generic message."""
+    import configparser
+
     on_config_error = on_config_error or _profile_config_error
     try:
         return build()
+    except configparser.Error as e:
+        # The SDK parses ~/.databrickscfg with a strict ConfigParser; a duplicated `[profile]`
+        # section or a malformed line raises here (not a ValueError) and would otherwise escape
+        # as a raw traceback.
+        _config_file_error(e)
     except ValueError as e:
         # Re-auth the profile the SDK error actually names (which may differ from `profile` — e.g.
         # the account client resolves to a separate auto-discovered profile), not the one we assumed.
@@ -458,6 +465,19 @@ def _client_or_exit(build, profile: str | None, flag: str, on_config_error=None)
             except ValueError as e2:
                 on_config_error(e2, profile, flag)
         on_config_error(e, profile, flag)
+
+
+def _config_file_error(e: Exception) -> None:
+    """Clean exit for an unparseable Databricks config file (duplicate section, bad syntax)."""
+    import os
+
+    path = os.path.expanduser(os.environ.get("DATABRICKS_CONFIG_FILE") or "~/.databrickscfg")
+    console.banner(
+        "danger",
+        f"Couldn't parse the Databricks config file {path}: {e}. Fix the file (each [profile] "
+        "section may appear only once) and rerun.",
+    )
+    raise typer.Exit(code=1) from None
 
 
 def _profile_config_error(e: Exception, profile: str | None, flag: str) -> None:

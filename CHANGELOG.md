@@ -15,8 +15,8 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ### Changed
 
-- **Ingress private access now mirrors `dbx-migrate-ip-acls` exactly (AWS/GCP).** The workspace's
-  legacy private access posture is recreated faithfully in the generated policy's `private_access`:
+- **Ingress private access now mirrors `dbx-migrate-ip-acls` exactly (AWS/GCP).** Reference
+  implementation: `dbx-migrate-ip-acls` v0.3.0. The workspace's legacy private access posture is recreated faithfully in the generated policy's `private_access`:
   - **No PAS attached is now "private access = no endpoints", not "nothing to migrate".** A no-PAS
     workspace accepts no private endpoints today, so the policy gets a `RESTRICTED_ACCESS` private
     block with no front-end allow rule (deny-all private) instead of being left at CBI's allow-all
@@ -55,6 +55,15 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ### Fixed
 
+- **No crash on consoles that can't encode emoji (legacy Windows / cp1252).** The first `ℹ️` banner
+  raised `UnicodeEncodeError` on a Windows Server console, killing the run. Banners now fall back
+  to ASCII tags (`[i]`, `[!]`, `[x]`, `[ok]`) when stdout/stderr aren't UTF-encoded, and those
+  streams are switched to `errors="replace"` so any other non-ASCII text degrades instead of
+  aborting.
+- **A malformed `~/.databrickscfg` now exits cleanly.** A duplicated `[profile]` section (or other
+  ini syntax error) raised a `configparser` exception out of the SDK that the client guard didn't
+  catch, surfacing as a raw traceback; it is now reported with the config file path and the
+  parser's message.
 - **Create/assign now fails closed when the assigned network policy can't be read.** A transient
   account-API error while reading the workspace's assigned policy was swallowed and treated as
   "nothing assigned", which silently skipped the per-dimension conflict gate, mode inheritance and the

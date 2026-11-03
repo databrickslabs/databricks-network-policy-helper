@@ -9,6 +9,7 @@ severity banners (info / warn / danger / success) the notebooks emitted as emoji
 from __future__ import annotations
 
 import json
+import sys
 from contextlib import contextmanager
 from typing import Any
 
@@ -39,6 +40,40 @@ THEME = Theme(
 
 console = Console(theme=THEME, highlight=False)
 
+
+def _stream_carries_unicode(stream: Any) -> bool:
+    """True when `stream` is UTF-encoded and can therefore carry the emoji glyphs below. On any
+    other encoding (a legacy Windows console on cp1252, a C-locale pipe) switch the stream to
+    `errors="replace"` so stray non-ASCII in a message degrades to '?' instead of crashing the
+    run with UnicodeEncodeError on the first banner."""
+    enc = (getattr(stream, "encoding", None) or "").replace("-", "").replace("_", "").lower()
+    if enc.startswith("utf"):
+        return True
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError, TypeError):  # closed/odd stream — nothing more to do
+            pass
+    return False
+
+
+# Evaluated once at import; glyph-free banners when the terminal can't encode the emoji ones.
+UNICODE_GLYPHS = _stream_carries_unicode(sys.stdout) and _stream_carries_unicode(sys.stderr)
+
+_GLYPHS_UNICODE = {
+    "info": ("ℹ️ ", "info"),
+    "warn": ("⚠️ ", "warn"),
+    "danger": ("⛔ ", "danger"),
+    "success": ("✅ ", "ok"),
+}
+_GLYPHS_ASCII = {
+    "info": ("[i] ", "info"),
+    "warn": ("[!] ", "warn"),
+    "danger": ("[x] ", "danger"),
+    "success": ("[ok] ", "ok"),
+}
+
 # Default cap on rows rendered to the terminal (the analysis is unaffected — only the display is
 # capped). Narrow the window with --min-events / --lookback-days to see fewer, higher-signal rows.
 MAX_TABLE_ROWS = 100
@@ -46,12 +81,7 @@ MAX_TABLE_ROWS = 100
 
 def banner(kind: str, message: str) -> None:
     """Print a one-line severity banner. kind in {info, warn, danger, success}."""
-    glyphs = {
-        "info": ("ℹ️ ", "info"),
-        "warn": ("⚠️ ", "warn"),
-        "danger": ("⛔ ", "danger"),
-        "success": ("✅ ", "ok"),
-    }
+    glyphs = _GLYPHS_UNICODE if UNICODE_GLYPHS else _GLYPHS_ASCII
     glyph, style = glyphs.get(kind, ("", "value"))
     console.print(Text(f"{glyph}{message}", style=style))
 
