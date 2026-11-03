@@ -13,6 +13,8 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-03
+
 ### Changed
 
 - **Ingress private access now mirrors `dbx-migrate-ip-acls` exactly (AWS/GCP).** Reference
@@ -79,7 +81,6 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
   `DENIED` / `DRY_RUN_DENIAL` / `ALLOWED`. Both queries failed on every run and the failure was
   swallowed (the table is read best-effort), so CBI denials never appeared in the denied view and
   `--include-inbound-network` never contributed candidates. Fixed to `policy_outcome`.
-
 - **`--disable-existing-ip-acls` is now rejected with `--policy-mode dry_run`.** It was only gated on
   `--create-policy` + `--auto-assign`, so a dry-run run could turn off the workspace's IP access lists
   and leave it with a log-only policy and no enforced ingress control. The flag now also requires
@@ -352,7 +353,8 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.6.0...v0.7.0
