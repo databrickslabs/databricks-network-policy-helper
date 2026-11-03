@@ -142,3 +142,21 @@ def test_account_build_error_defers_on_other_errors(monkeypatch):
 
     assert called["args"] == ("no host configured for profile foo", "foo", "--account-profile")
     assert "banner" not in called  # no account-specific banner for a non-default-auth error
+
+
+def test_client_or_exit_reports_unparseable_config_file(monkeypatch, capsys):
+    # A duplicated [profile] section makes the SDK's strict ConfigParser raise a configparser.Error
+    # (not a ValueError); that must become a clean exit naming the file, not a raw traceback.
+    import configparser
+
+    def build():
+        raise configparser.DuplicateSectionError("acct", "C:/x/.databrickscfg", 19)
+
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", "/tmp/dup.databrickscfg")
+    monkeypatch.setattr(cli, "_reauthenticate", lambda profile: pytest.fail("no re-auth for parse errors"))
+    with pytest.raises(typer.Exit) as exc:
+        cli._client_or_exit(build, "acct", "--account-profile")
+    assert exc.value.exit_code == 1
+    out = capsys.readouterr().out
+    assert "/tmp/dup.databrickscfg" in out
+    assert "already exists" in out

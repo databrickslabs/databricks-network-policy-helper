@@ -136,7 +136,7 @@ def test_analyze_folds_in_inbound_dry_run_candidate(monkeypatch, candidates_df):
             return pd.DataFrame()
         if "DRY_RUN_DENIAL" in text:  # the candidate_ips_from_inbound_network query
             return pd.DataFrame([_inbound_candidate("93.184.216.42", events=9)])
-        if "inbound_network" in text:  # the DROP denied-view query
+        if "inbound_network" in text:  # the DENIED denied-view query
             return pd.DataFrame()
         if "IpAccessDenied" in text:
             return pd.DataFrame(columns=["source_ip"])

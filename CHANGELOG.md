@@ -13,6 +13,80 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-03
+
+### Changed
+
+- **Ingress private access now mirrors `dbx-migrate-ip-acls` exactly (AWS/GCP).** Reference
+  implementation: `dbx-migrate-ip-acls` v0.3.0. The workspace's legacy private access posture is recreated faithfully in the generated policy's `private_access`:
+  - **No PAS attached is now "private access = no endpoints", not "nothing to migrate".** A no-PAS
+    workspace accepts no private endpoints today, so the policy gets a `RESTRICTED_ACCESS` private
+    block with no front-end allow rule (deny-all private) instead of being left at CBI's allow-all
+    default — which would have loosened the posture once CBI is the source of truth for private
+    access. Like an endpoint-scoped PAS, it counts as migrating restrictive private for the
+    create-and-assign conflict gate (abort over an existing restrictive CBI private block).
+  - **Rule names are now fixed.** The PAS-migrated rule is labelled **"Inbound private endpoints"**
+    (previously the PAS name verbatim) and the back-end rule **"Classic compute REST API endpoint"**
+    (previously "back-end PrivateLink (data-plane relay + REST)").
+  - **The back-end rule carries only the REST API endpoint.** The network config's secure cluster
+    connectivity relay endpoint is no longer added — it doesn't carry ingress to the workspace's REST
+    API, so it has no place in a CBI private_access rule.
+  - An account-level (allow-all) PAS over an existing restrictive CBI private block still keeps the
+    stricter existing block (no abort) — unchanged, now documented as the agreed behaviour.
+  - The workspace's cloud is now taken from the account API's `cloud` field first, falling back to
+    the host domain (as `dbx-migrate-ip-acls` does). On an undetermined cloud a PAS is still migrated
+    when present, but the no-PAS → deny-all mapping is not applied blind — the run warns instead.
+- **The generated ingress policy inherits the existing CBI policy's enforcement mode.** When the
+  workspace's assigned policy already has restrictive public **or** private (or cross-workspace)
+  rules, those rules are carried forward, so the generated policy now runs in **that policy's mode**
+  and `--policy-mode` is ignored with a warning — previously an enforced block carried into a
+  `dry_run` run was silently demoted to log-only (and a dry-run block carried into an `enforce` run
+  silently started blocking). Under an inherited dry-run, `--disable-existing-ip-acls` is ignored
+  with a warning (the legacy IP access lists can't be turned off while the only policy is log-only).
+  When nothing restrictive is assigned, `--policy-mode` applies as before.
+- **A PAS with public access disabled now becomes an explicit deny-all public block (AWS/GCP).** A
+  PrivateLink-only workspace rejects all public ingress today, so the generated `public_access` is
+  `RESTRICTED_ACCESS` with no allow rules instead of being omitted (= CBI's FULL_ACCESS default, which
+  would open the workspace once CBI is the source of truth). Its IP access lists aren't migrated and
+  observed-traffic public rules are shown for review but not written. Mirrors `dbx-migrate-ip-acls`.
+- **Propose-only runs now preview private access, carried-forward blocks and the inherited mode.**
+  Without `--create-policy` the helper builds an account client best-effort (workspace-profile account
+  id + matching account profile, or `--account-profile`) so the preview and `--export` show the same
+  policy an apply would write. Previously propose-only never read the PAS or the assigned policy, so
+  the preview silently omitted the private block.
+
+### Fixed
+
+- **No crash on consoles that can't encode emoji (legacy Windows / cp1252).** The first `ℹ️` banner
+  raised `UnicodeEncodeError` on a Windows Server console, killing the run. Banners now fall back
+  to ASCII tags (`[i]`, `[!]`, `[x]`, `[ok]`) when stdout/stderr aren't UTF-encoded, and those
+  streams are switched to `errors="replace"` so any other non-ASCII text degrades instead of
+  aborting.
+- **A malformed `~/.databrickscfg` now exits cleanly.** A duplicated `[profile]` section (or other
+  ini syntax error) raised a `configparser` exception out of the SDK that the client guard didn't
+  catch, surfacing as a raw traceback; it is now reported with the config file path and the
+  parser's message.
+- **Create/assign now fails closed when the assigned network policy can't be read.** A transient
+  account-API error while reading the workspace's assigned policy was swallowed and treated as
+  "nothing assigned", which silently skipped the per-dimension conflict gate, mode inheritance and the
+  opposite-direction egress guard — a run could have replaced a restrictive policy. The read is now
+  retried once and, if it still fails, a run that would create or assign a policy aborts with the
+  error; propose-only continues with a warning that existing rules are unknown.
+- **The denied-IP views are now scoped to the current workspace.** `denied_requests` and the
+  `system.access.inbound_network` queries ignored the workspace filter, so in `current_workspace`
+  scope the "recently denied" table (and `--deny-denied-ips` deny rules) drew on every workspace in
+  the shared metastore.
+- **The `system.access.inbound_network` queries used a column that doesn't exist.** They filtered on
+  `access_type = 'DROP'` / `'DRY_RUN_DENIAL'`; the table's column is `policy_outcome` with values
+  `DENIED` / `DRY_RUN_DENIAL` / `ALLOWED`. Both queries failed on every run and the failure was
+  swallowed (the table is read best-effort), so CBI denials never appeared in the denied view and
+  `--include-inbound-network` never contributed candidates. Fixed to `policy_outcome`.
+- **`--disable-existing-ip-acls` is now rejected with `--policy-mode dry_run`.** It was only gated on
+  `--create-policy` + `--auto-assign`, so a dry-run run could turn off the workspace's IP access lists
+  and leave it with a log-only policy and no enforced ingress control. The flag now also requires
+  `--policy-mode enforce` (matching `dbx-migrate-ip-acls`); the guided wizard only offers it for an
+  enforced policy.
+
 ## [0.8.1] - 2026-10-27
 
 ### Fixed
@@ -279,13 +353,14 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.8.1...HEAD
-[0.8.1]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.8.0...v0.8.1
-[0.8.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/andyweaves/databricks-network-policy-helper/releases/tag/v0.1.0
+[Unreleased]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/databrickslabs/databricks-network-policy-helper/releases/tag/v0.1.0

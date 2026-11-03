@@ -111,8 +111,7 @@ def _load_dbt(now) -> list[tuple]:
 
 # --- Tableau Cloud (curated — help.tableau.com Hyperforce pods) ------------------------------------
 _TABLEAU_SOURCE = (
-    "https://help.tableau.com/current/pro/desktop/en-us/"
-    "publish_tableau_online_ip_authorization.htm"
+    "https://help.tableau.com/current/pro/desktop/en-us/" "publish_tableau_online_ip_authorization.htm"
 )
 _TABLEAU_LAST_VERIFIED = "2026-10-23"
 # (cidr, region-label). Hyperforce pod egress ranges only — the page's pre-Hyperforce single IPs are

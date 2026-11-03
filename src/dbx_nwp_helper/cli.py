@@ -445,9 +445,16 @@ def _client_or_exit(build, profile: str | None, flag: str, on_config_error=None)
     `on_config_error(e, profile, flag)` is the terminal handler for a non-reauthable ValueError; it
     defaults to `_profile_config_error`. The account path passes its own so a no-account-credentials
     failure gets account-admin guidance instead of the generic message."""
+    import configparser
+
     on_config_error = on_config_error or _profile_config_error
     try:
         return build()
+    except configparser.Error as e:
+        # The SDK parses ~/.databrickscfg with a strict ConfigParser; a duplicated `[profile]`
+        # section or a malformed line raises here (not a ValueError) and would otherwise escape
+        # as a raw traceback.
+        _config_file_error(e)
     except ValueError as e:
         # Re-auth the profile the SDK error actually names (which may differ from `profile` — e.g.
         # the account client resolves to a separate auto-discovered profile), not the one we assumed.
@@ -458,6 +465,19 @@ def _client_or_exit(build, profile: str | None, flag: str, on_config_error=None)
             except ValueError as e2:
                 on_config_error(e2, profile, flag)
         on_config_error(e, profile, flag)
+
+
+def _config_file_error(e: Exception) -> None:
+    """Clean exit for an unparseable Databricks config file (duplicate section, bad syntax)."""
+    import os
+
+    path = os.path.expanduser(os.environ.get("DATABRICKS_CONFIG_FILE") or "~/.databrickscfg")
+    console.banner(
+        "danger",
+        f"Couldn't parse the Databricks config file {path}: {e}. Fix the file (each [profile] "
+        "section may appear only once) and rerun.",
+    )
+    raise typer.Exit(code=1) from None
 
 
 def _profile_config_error(e: Exception, profile: str | None, flag: str) -> None:
@@ -749,17 +769,23 @@ def _ingress_preflight(
 
       * **public**  — abort if we're migrating public (observed traffic / IP access lists) and the
         assigned policy has a restrictive public_access;
-      * **private** — abort if we're migrating a *non-allow-all* PAS and the assigned policy has a
-        restrictive private_access.
+      * **private** — abort if we're migrating a *restrictive* legacy private posture (an
+        endpoint-scoped PAS, no PAS at all — which on AWS/GCP means no endpoints — or a back-end REST
+        API endpoint) and the assigned policy has a restrictive private_access. (An account-level
+        allow-all PAS never conflicts: the stricter existing CBI private block is kept instead.)
 
-    `existing` is (existing_public, existing_private, migrating_restrictive_private, assigned_id) from
-    _reconcile_existing_ingress. Existing private-access and cross-workspace blocks are carried
-    forward (not dropped), so only the egress opposite-direction guard remains on a new-id rebind.
+    `existing` is (existing_public, existing_private, migrating_restrictive_private, assigned_id,
+    read_error) from _reconcile_existing_ingress (read_error is handled by the caller before this
+    runs — a run that couldn't read the assigned policy never gets here). Existing private-access
+    and cross-workspace blocks are carried forward (not dropped), so only the egress
+    opposite-direction guard remains on a new-id rebind. `migrating_public` is True when this run
+    writes a public block of its own — observed-traffic / IP-ACL allow rules, OR the deny-all public
+    block that mirrors a PAS with public access disabled.
     Called only when the run will create AND assign a single policy — never for per_workspace or
     add_to_existing."""
     from .core import acl as acl_core
 
-    existing_public, existing_private, migrating_restrictive_private, assigned_id = existing
+    existing_public, existing_private, migrating_restrictive_private, assigned_id = existing[:4]
     if migrating_public and existing_public is not None:
         console.banner(
             "danger",
@@ -773,8 +799,9 @@ def _ingress_preflight(
         console.banner(
             "danger",
             f"This workspace's assigned CBI policy ('{assigned_id}') already has restrictive PRIVATE "
-            "access rules, and this run migrates a non-allow-all front-end PrivateLink PAS over the "
-            "top. Replacing an existing restrictive CBI private policy is NOT supported yet - aborting.",
+            "access rules, and this run migrates the workspace's legacy private access posture "
+            "(endpoint-scoped PAS / no PAS = no endpoints / back-end REST API endpoint) over the top. "
+            "Replacing an existing restrictive CBI private policy is NOT supported yet - aborting.",
         )
         raise typer.Exit(code=1)
 
@@ -782,9 +809,28 @@ def _ingress_preflight(
     # policy's egress (the new policy carries a FULL_ACCESS egress default). Ingress blocks are built
     # or carried forward, so only egress needs guarding here.
     if new_policy_id and new_policy_id != assigned_id:
-        _pid, pol = acl_core.assigned_policy(account, workspace_id)
+        pid, pol, read_error = acl_core.assigned_policy_state(account, workspace_id)
+        if read_error:
+            _abort_unreadable_assigned_policy(read_error, workspace_id)
         if pol is not None:
-            _warn_or_abort_dropped_egress(acl_core, assigned_id, getattr(pol, "egress", None), "ingress")
+            _warn_or_abort_dropped_egress(acl_core, pid, getattr(pol, "egress", None), "ingress")
+
+
+def _abort_unreadable_assigned_policy(read_error: str, workspace_id) -> None:
+    """Fail CLOSED when the workspace's assigned network policy can't be read on a write path. Without
+    it we can't tell whether restrictive CBI rules are already in force — so the per-dimension
+    conflict gate, mode inheritance and the opposite-direction egress guard would all silently pass,
+    and the run could replace a restrictive policy. Propose-only runs warn instead (see
+    _reconcile_existing_ingress)."""
+    console.banner(
+        "danger",
+        f"Couldn't read the network policy assigned to workspace {workspace_id} ({read_error}). "
+        "Without it this run can't tell whether restrictive CBI ingress/egress rules are already in "
+        "force, so it can't safely create or assign a policy — aborting, nothing written. Re-run in a "
+        "moment (transient account-API errors are common right after a policy write), or check the "
+        "account credentials.",
+    )
+    raise typer.Exit(code=1)
 
 
 def _warn_or_abort_dropped_egress(acl_core, pid, egress, this_direction: str) -> None:
@@ -820,7 +866,9 @@ def _egress_preflight(account, workspace_id, new_policy_id: str, yes: bool) -> N
     the run will create AND assign a single policy."""
     from .core import acl as acl_core
 
-    pid, pol = acl_core.assigned_policy(account, workspace_id)
+    pid, pol, read_error = acl_core.assigned_policy_state(account, workspace_id)
+    if read_error:
+        _abort_unreadable_assigned_policy(read_error, workspace_id)
     if pol is None:
         return
     egr = getattr(pol, "egress", None)
@@ -947,50 +995,143 @@ def _confirm_overwrite_policy(account, policy_id: str, direction: str, yes: bool
         raise typer.Exit(code=0)
 
 
-def _reconcile_existing_ingress(account, workspace_id, wc, cfg: IngressConfig, yes: bool):
-    """Read the workspace's front-end PrivateLink (AWS/GCP PAS) and its existing assigned CBI policy,
-    and decide — per independent dimension — what the generated policy carries alongside the net-new
-    public allow-list built from traffic:
+def _optional_account_client(conn: Connection):
+    """Best-effort account client for a propose-only run, so the preview / export reflect the PAS,
+    the existing assigned policy and the inherited mode exactly as an apply would. Never prompts and
+    never exits: returns (None, None) with an info banner when no account id is known or no account
+    credentials resolve / work. Returns (account, this_workspace_id) on success."""
+    from . import auth
 
-    * **private_access** — migrate a **non-allow-all** PAS (AWS/GCP, specific registered endpoints,
-      mapped across as-is); else carry an existing CBI private_access forward. An allow-all (ACCOUNT)
-      PAS needs no migration (CBI defaults to allow-all) and must NOT loosen an existing *restrictive*
-      private block — the stricter existing rules win. Azure never migrates PrivateLink (its
-      `databricks_ui_api` endpoints are default-allowed), so it only ever carries existing forward.
+    if not conn.account_id:
+        console.banner(
+            "info",
+            "No account id resolved — private access / existing-policy reuse won't be previewed. Pass "
+            "--account-id and --account-profile <account-admin login> for a preview that matches the "
+            "apply.",
+        )
+        return None, None
+    _resolve_account_profile(conn)
+    try:
+        account = auth.account_client(conn)
+        this_ws = auth.this_workspace_id(conn)
+        account.workspaces.get(workspace_id=int(this_ws))  # cheap probe: creds + account match
+    except Exception as e:  # noqa: BLE001 - propose-only must never fail on account auth
+        console.banner(
+            "info",
+            f"Account API not reachable with the resolved credentials ({type(e).__name__}) — private "
+            "access / existing-policy reuse won't be previewed. Pass --account-profile <account-admin "
+            "login> for a preview that matches the apply.",
+        )
+        return None, None
+    console.banner(
+        "info",
+        "Propose-only run with account credentials — previewing private access, existing-policy "
+        "reuse and inherited mode exactly as an apply would (nothing is written).",
+    )
+    return account, this_ws
+
+
+def _reconcile_existing_ingress(account, workspace_id, wc, cfg: IngressConfig, yes: bool):
+    """Read the workspace's legacy private access posture (AWS/GCP: its PAS + back-end REST endpoint)
+    and its existing assigned CBI policy, and decide — per independent dimension — what the generated
+    policy carries alongside the net-new public allow-list built from traffic. Mirrors the
+    `databricks-migrate-ip-acls` sibling's logic exactly, so both tools emit the same policy:
+
+    * **private_access** (AWS/GCP) — recreate the legacy posture faithfully:
+        - endpoint-scoped PAS → RESTRICTED_ACCESS listing its endpoints ("Inbound private endpoints");
+        - **no PAS** → RESTRICTED_ACCESS with no front-end rule (a no-PAS workspace accepts no private
+          endpoints today, so this is private access = no endpoints — NOT "nothing to migrate");
+        - either way plus a "Classic compute REST API endpoint" rule for the network config's back-end
+          REST endpoint(s), when present (legacy allowed endpoints = PAS endpoints OR REST endpoint);
+        - account-level (allow-all) PAS → CBI's allow-all default, EXCEPT it must never loosen an
+          existing *restrictive* CBI private block — the stricter existing rules win (no abort).
+      Azure never migrates PrivateLink (its `databricks_ui_api` endpoints are default-allowed), so it
+      only ever carries an existing CBI private block forward. On an undetermined cloud a PAS is still
+      migrated when present, but the no-PAS → deny-all mapping (only known to hold on AWS/GCP) is not
+      applied blind — it warns instead.
     * **cross_workspace_access** — never built; any existing block is carried forward verbatim.
     * **public_access** — built net-new from traffic/ACLs; an existing restrictive public is carried
       forward only when this run has nothing of its own to build (resolved in ingress_rules).
+    * **mode** — if the assigned CBI policy has restrictive public OR private (or cross-workspace)
+      rules, the generated policy inherits that policy's enforcement mode and `--policy-mode` is
+      ignored, so carrying those rules forward never silently promotes dry-run rules to blocking or
+      demotes enforced ones to log-only. If the inherited mode is dry_run,
+      `--disable-existing-ip-acls` is ignored too (the legacy ACLs stay on). With nothing restrictive,
+      `--policy-mode` applies as given.
 
-    Sets cfg.private_access / cfg.existing_public / cfg.existing_xws. Returns
-    (existing_public, existing_private, migrating_restrictive_private, assigned_id) for the conflict
-    gate. Needs an account client; a no-op (all None/False) without one."""
+    Sets cfg.private_access / cfg.existing_public / cfg.existing_xws (and may override
+    cfg.policy_mode / cfg.disable_existing_ip_acls). Returns (existing_public, existing_private,
+    migrating_restrictive_private, assigned_id, read_error) for the conflict gate; `read_error` is set
+    when the assigned policy could not be read — the caller must then refuse to write (the existing_*
+    fields are unknown, not empty). Needs an account client; a no-op (all None/False) without one."""
     from .core import acl as acl_core
-    from .core import egress as eg
     from .core import policy as policy_core
 
     if account is None:
-        return None, None, False, None  # can't read the PAS / assigned policy without account creds
-    cloud = eg.workspace_cloud_from_host(getattr(getattr(wc, "config", None), "host", None))
+        return None, None, False, None, None  # can't read the PAS / assigned policy without account creds
+    host = getattr(getattr(wc, "config", None), "host", None)
+    cloud = acl_core.workspace_cloud(account, workspace_id, host=host)
 
-    # Front-end PrivateLink plan (AWS/GCP only — Azure has no PAS to migrate).
+    # Legacy private access plan. Azure has no PAS and nothing to migrate; everywhere else read the
+    # PAS, and on AWS/GCP treat "no PAS" as deny-all private.
     plan = None
-    if cloud in ("aws", "gcp"):
+    if cloud != "azure":
         pas, status = acl_core.read_workspace_pas(account, workspace_id)
         if status == "error":
             console.banner(
                 "warn",
                 "Couldn't read the workspace's Private Access Settings (account read failed) — "
-                "front-end PrivateLink won't be migrated. Verify it manually if this workspace uses it.",
+                "private access won't be migrated. Verify it manually if this workspace uses PrivateLink.",
             )
         elif status == "ok":
             plan = acl_core.plan_from_pas(pas)
+            if not acl_core.pas_public_access_enabled(pas):
+                # PrivateLink-only workspace: the PAS rejects all public ingress today, so the IP access
+                # lists are not in effect and observed public traffic (if any) predates the toggle.
+                # Mirror it as an explicit deny-all public block (never CBI's FULL_ACCESS default).
+                cfg.public_access_disabled = True
+                cfg.migrate_ip_acls = False
+                console.banner(
+                    "warn",
+                    "Public network access is DISABLED on this workspace's Private Access Settings "
+                    "(PrivateLink-only) — the policy's public_access will be an explicit deny-all "
+                    "(RESTRICTED_ACCESS, no allow rules), recreating that posture faithfully. Observed-"
+                    "traffic and IP access list public rules are shown for review but NOT written, since "
+                    "public ingress is closed today.",
+                )
+        elif cloud in ("aws", "gcp"):
+            # 'none': no PAS attached → legacy private access = no endpoints (deny-all private)
+            plan = acl_core.plan_without_pas()
+        else:
+            # 'none' on a cloud we couldn't determine: the no-PAS → deny-all mapping is only known to
+            # hold on AWS/GCP, so don't apply it blind.
+            console.banner(
+                "warn",
+                "Couldn't determine this workspace's cloud and it has no Private Access Settings "
+                "attached — private access is NOT migrated (on AWS/GCP that would be a deny-all private "
+                "block). Verify the generated policy's private access before relying on it.",
+            )
 
-    # Existing assigned CBI policy's (restrictive-only, deep-copied) ingress sub-blocks.
-    assigned_id, existing_public, existing_private, existing_xws = acl_core.existing_cbi_ingress(
-        account, workspace_id
-    )
+    # Existing assigned CBI policy's (restrictive-only, deep-copied) ingress sub-blocks + their mode.
+    (
+        assigned_id,
+        existing_public,
+        existing_private,
+        existing_xws,
+        existing_mode,
+        read_error,
+    ) = acl_core.existing_cbi_state(account, workspace_id)
+    if read_error:
+        console.banner(
+            "warn",
+            f"Couldn't read the network policy assigned to this workspace ({read_error}). Existing CBI "
+            "rules, their enforcement mode and any conflict with what this run migrates are therefore "
+            "UNKNOWN — the preview below cannot carry them forward or inherit their mode. A run that "
+            "creates/assigns a policy will refuse to proceed in this state.",
+        )
 
-    # Resolve private_access: migrate the PAS, else carry existing forward (allow-all never loosens).
+    # Resolve private_access: migrate the legacy posture, else carry existing forward (allow-all
+    # never loosens).
     if plan is not None:
         if plan.restriction_mode == "ALLOW_ALL_REGISTERED_ENDPOINTS" and acl_core.block_restrictive(
             existing_private
@@ -1002,23 +1143,24 @@ def _reconcile_existing_ingress(account, workspace_id, wc, cfg: IngressConfig, y
                 "already has restrictive CBI private access — keeping the stricter existing private rules.",
             )
         else:
-            # A RESTRICTED_ACCESS (endpoint-scoped) private block gates ALL private ingress, so the
-            # workspace's back-end PrivateLink endpoints (data-plane relay + REST — in the network
-            # config, not the PAS) must be allowed too, or the data plane is blocked. (ALLOW_ALL
-            # already permits every registered endpoint, so there's nothing to add there.)
+            # A RESTRICTED_ACCESS private block gates ALL private ingress, so the workspace's back-end
+            # PrivateLink REST API endpoint (in the network config, not the PAS) must be allowed too,
+            # or classic compute is blocked. (ALLOW_ALL already permits every registered endpoint, so
+            # there's nothing to add there.)
             if plan.restriction_mode == "RESTRICTED_ACCESS":
                 plan.backend_endpoint_ids = acl_core.backend_private_endpoint_ids(account, workspace_id)
                 if plan.backend_endpoint_ids:
                     console.banner(
                         "info",
-                        f"Detected {len(plan.backend_endpoint_ids)} back-end PrivateLink endpoint(s) "
-                        "(data-plane relay + REST) for this workspace — including them in the policy's "
-                        "private_access so the restricted private rules don't block the data plane.",
+                        f"Detected {len(plan.backend_endpoint_ids)} back-end PrivateLink REST API "
+                        "endpoint(s) for this workspace — adding them to the policy's private_access as a "
+                        f"'{policy_core.BACKEND_PRIVATE_LABEL}' rule so the restricted private rules "
+                        "don't block classic compute.",
                     )
                 else:
                     console.banner(
-                        "warn",
-                        "No back-end PrivateLink endpoint detected for this workspace to migrate.",
+                        "info",
+                        "No back-end PrivateLink REST API endpoint detected for this workspace — none added.",
                     )
             cfg.private_access = policy_core.build_private_access_block(
                 plan.restriction_mode,
@@ -1026,11 +1168,20 @@ def _reconcile_existing_ingress(account, workspace_id, wc, cfg: IngressConfig, y
                 plan.label,
                 backend_endpoint_ids=plan.backend_endpoint_ids,
             )
-            console.banner(
-                "info",
-                f"Front-end PrivateLink detected (PAS '{plan.source_pas_id}') — recreating it in the "
-                "policy's private_access block.",
-            )
+            if plan.source_pas_id is None:
+                console.banner(
+                    "info",
+                    "No Private Access Settings attached to this workspace — on AWS/GCP that means it "
+                    "accepts no private endpoints today, so the policy's private_access is "
+                    "RESTRICTED_ACCESS with no front-end allow rule (deny-all private), recreating that "
+                    "posture faithfully rather than leaving CBI's allow-all default.",
+                )
+            else:
+                console.banner(
+                    "info",
+                    f"Front-end PrivateLink detected (PAS '{plan.source_pas_id}') — recreating it in the "
+                    "policy's private_access block.",
+                )
     elif existing_private is not None:
         cfg.private_access = existing_private
         console.banner(
@@ -1047,8 +1198,42 @@ def _reconcile_existing_ingress(account, workspace_id, wc, cfg: IngressConfig, y
             "doesn't build cross-workspace rules).",
         )
 
+    _inherit_existing_mode(cfg, existing_mode, assigned_id)
+
     migrating_restrictive_private = plan is not None and plan.restriction_mode == "RESTRICTED_ACCESS"
-    return existing_public, existing_private, migrating_restrictive_private, assigned_id
+    return existing_public, existing_private, migrating_restrictive_private, assigned_id, read_error
+
+
+def _inherit_existing_mode(cfg: IngressConfig, existing_mode: str | None, assigned_id: str | None) -> None:
+    """Pin the generated policy's enforcement mode to the assigned CBI policy's when that policy has
+    restrictive ingress rules (`existing_mode` is "enforce" / "dry_run"; None when nothing restrictive
+    is assigned, in which case --policy-mode stands). Those rules are carried forward (or collide and
+    abort later), so switching mode would silently promote dry-run rules to blocking or demote
+    enforced ones to log-only. Under an inherited dry_run, --disable-existing-ip-acls is ignored: the
+    legacy IP access lists can't be turned off while the only policy is log-only."""
+    if existing_mode is None:
+        return
+    if existing_mode != cfg.policy_mode:
+        console.banner(
+            "warn",
+            f"The workspace's assigned CBI policy ('{assigned_id}') has restrictive ingress rules in "
+            f"{existing_mode.upper()} mode — the generated policy inherits that mode. Ignoring "
+            f"--policy-mode {cfg.policy_mode}.",
+        )
+        cfg.policy_mode = existing_mode
+    else:
+        console.banner(
+            "info",
+            f"The workspace's assigned CBI policy ('{assigned_id}') has restrictive ingress rules in "
+            f"{existing_mode.upper()} mode — the generated policy keeps that mode.",
+        )
+    if existing_mode == "dry_run" and cfg.disable_existing_ip_acls:
+        console.banner(
+            "warn",
+            "Ignoring --disable-existing-ip-acls: the generated policy inherits DRY_RUN (log-only) mode "
+            "from the existing CBI policy, so the legacy IP access lists stay enabled.",
+        )
+        cfg.disable_existing_ip_acls = False
 
 
 def _note_partner_platforms(analysis) -> None:
@@ -1393,7 +1578,7 @@ def ingress(
     ),
     include_inbound_network: bool = typer.Option(
         True,
-        help="Also use system.access.inbound_network dry-run denials (access_type=DRY_RUN_DENIAL) as "
+        help="Also use system.access.inbound_network dry-run denials (policy_outcome=DRY_RUN_DENIAL) as "
         "allow-list candidates — public inbound clients a log-only CBI policy would block but the "
         "allow-list doesn't yet cover. Best-effort; on by default, --no-include-inbound-network to skip.",
     ),
@@ -1439,9 +1624,9 @@ def ingress(
     ),
     disable_existing_ip_acls: bool = typer.Option(
         False,
-        help="After creating AND assigning the policy, disable this workspace's existing IP "
-        "access lists (enableIpAccessLists=false). Requires --create-policy and "
-        "--auto-assign.",
+        help="After creating AND assigning an ENFORCED policy, disable this workspace's existing IP "
+        "access lists (enableIpAccessLists=false). Requires --create-policy, --auto-assign and "
+        "--policy-mode enforce; ignored when the policy inherits dry_run from the existing CBI policy.",
     ),
     account_id: str | None = typer.Option(None, help="Databricks account_id (apply/identity)."),
     account_host: str | None = typer.Option(
@@ -1911,7 +2096,9 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
 
     try:
         validate_apply(cfg.apply, cfg.policy_scope, other_direction="egress")
-        validate_disable_ip_acls(cfg.disable_existing_ip_acls, cfg.apply.create_policy, cfg.apply.auto_assign)
+        validate_disable_ip_acls(
+            cfg.disable_existing_ip_acls, cfg.apply.create_policy, cfg.apply.auto_assign, cfg.policy_mode
+        )
         validate_policy_name(cfg.policy_name, cfg.policy_scope, cfg.apply.policy_action)
         validate_export(cfg.export, cfg.policy_scope)
     except ValueError as e:
@@ -1946,6 +2133,11 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         _resolve_account_profile(conn)
         this_ws = auth.this_workspace_id(conn)
         account = _account_client_or_exit(conn, workspace_id=this_ws)
+    else:
+        # Propose-only: still try for an account client, best-effort, so the preview / --export show
+        # the PAS-derived private_access, carried-forward existing blocks and inherited mode exactly
+        # as an apply would — otherwise the preview silently omits the private block it would write.
+        account, this_ws = _optional_account_client(conn)
 
     http_path = sql.resolve_warehouse(conn)
     with sql.connection(conn, http_path) as sconn:
@@ -1960,6 +2152,8 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     # decide per dimension what the generated policy carries (migrate private from a PAS, carry
     # existing private/public/cross-workspace forward). Needs an account client → no-op without one.
     existing_ingress = _reconcile_existing_ingress(account, this_ws, wc, cfg, yes)
+    if existing_ingress[4] and cfg.apply.create_policy:
+        _abort_unreadable_assigned_policy(existing_ingress[4], this_ws)
     # Optionally let the user cull the proposed allow rules before they're built (and before SCIM).
     # Snapshot the full observed-traffic suggestions first: if a policy-limit truncation makes the
     # user want to go back and re-pick, the selection screen can re-offer every rule (the picker
@@ -2003,7 +2197,9 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     if not cfg.apply.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
         return
-    if not _has_rules(policies) and not (cfg.private_access or cfg.existing_public or cfg.existing_xws):
+    if not _has_rules(policies) and not (
+        cfg.private_access or cfg.existing_public or cfg.existing_xws or cfg.public_access_disabled
+    ):
         console.banner(
             "danger",
             "Nothing to apply — the analysis produced no ingress rules, so no "
@@ -2022,7 +2218,12 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     ):
         new_id = rules._single_policy_id(cfg, conn.profile, this_ws)
         _ingress_preflight(
-            account, this_ws, new_id, yes, existing=existing_ingress, migrating_public=_has_rules(policies)
+            account,
+            this_ws,
+            new_id,
+            yes,
+            existing=existing_ingress,
+            migrating_public=_has_rules(policies) or cfg.public_access_disabled,
         )
 
     # Guard against silently clobbering an existing policy's ingress rules — for every id apply()

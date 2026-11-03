@@ -96,26 +96,32 @@ def build_deny_rule(spec: dict):
     )
 
 
-BACKEND_PRIVATE_LABEL = "back-end PrivateLink (data-plane relay + REST)"
+# Fixed labels for the private_access allow rules a migration writes (agreed naming, shared with the
+# `databricks-migrate-ip-acls` sibling so the two tools emit identical policies):
+#   * the PAS's allowed front-end endpoints              -> "Inbound private endpoints"
+#   * the network config's back-end REST API endpoint(s) -> "Classic compute REST API endpoint"
+INBOUND_PRIVATE_LABEL = "Inbound private endpoints"
+BACKEND_PRIVATE_LABEL = "Classic compute REST API endpoint"
 
 
 def build_private_access_block(
     restriction_mode: str,
     endpoint_ids: list[str] | None = None,
-    label: str = "registered-private-endpoints",
+    label: str = INBOUND_PRIVATE_LABEL,
     backend_endpoint_ids: list[str] | None = None,
 ):
     """A CustomerFacingIngressNetworkPolicyPrivateAccess (front-end PrivateLink) sub-block:
       * ALLOW_ALL_REGISTERED_ENDPOINTS -> the mode alone (any endpoint registered to the account);
-      * RESTRICTED_ACCESS -> one allow rule whose origin lists the PAS front-end endpoint ids, PLUS a
-        second allow rule for the workspace's back-end PrivateLink endpoints (`backend_endpoint_ids` —
-        the data-plane SCC relay + REST, which live in the network config, not the PAS). A
-        RESTRICTED_ACCESS block gates ALL private ingress, so without the back-end endpoints it would
-        block the data plane. With no ids at all (an endpoint-scoped PAS that allows nothing, and no
-        back-end PrivateLink) the block is RESTRICTED_ACCESS with no allow rules — faithfully, no
-        endpoint permitted.
-    The front-end ids are the PAS `allowed_vpc_endpoint_ids`, mapped across as-is; `label` is the PAS
-    name verbatim (see acl.plan_from_pas)."""
+      * RESTRICTED_ACCESS -> one allow rule ("Inbound private endpoints") whose origin lists the PAS
+        front-end endpoint ids, PLUS a second allow rule ("Classic compute REST API endpoint") for the
+        workspace's back-end PrivateLink REST API endpoint(s) (`backend_endpoint_ids` — from the
+        network config, not the PAS; the SCC relay endpoint is deliberately NOT included, it doesn't
+        reach the workspace's REST API). A RESTRICTED_ACCESS block gates ALL private ingress, so without
+        the REST endpoint it would block classic compute. With no ids at all (no PAS attached — legacy
+        private access = no endpoints — or an endpoint-scoped PAS that allows nothing, and no back-end
+        PrivateLink) the block is RESTRICTED_ACCESS with no allow rules — faithfully, no endpoint
+        permitted.
+    The front-end ids are the PAS `allowed_vpc_endpoint_ids`, mapped across as-is."""
     from databricks.sdk.service.settings import (  # noqa: I001
         CustomerFacingIngressNetworkPolicyEndpoints as Endpoints,
         CustomerFacingIngressNetworkPolicyPrivateAccess as PrivateAccess,
@@ -138,8 +144,8 @@ def build_private_access_block(
     rules = []
     if endpoint_ids:
         rules.append(_rule(label, list(endpoint_ids)))
-    # Back-end endpoints aren't in the PAS; a RESTRICTED_ACCESS block built from the PAS alone would
-    # block them. Add them as a distinct, clearly-labelled rule, deduped against the front-end set.
+    # The back-end REST endpoint isn't in the PAS; a RESTRICTED_ACCESS block built from the PAS alone
+    # would block it. Add it as a distinct, clearly-labelled rule, deduped against the front-end set.
     front = set(endpoint_ids or [])
     backend = [e for e in (backend_endpoint_ids or []) if e not in front]
     if backend:
@@ -178,6 +184,19 @@ def build_public_access_block(allow: list[dict], deny: list[dict], note: Note = 
         allow_rules=[build_ingress_rule(s) for s in allow],
         deny_rules=[build_deny_rule(s) for s in (deny or [])] or None,
     )
+
+
+def build_deny_all_public_block():
+    """A public_access block that permits NO public ingress — RESTRICTED_ACCESS with no allow rules.
+    Written when the workspace's PAS has public access disabled (PrivateLink-only), so the CBI policy
+    recreates that posture rather than falling back to the FULL_ACCESS default once CBI is the source
+    of truth. Mirrors `databricks-migrate-ip-acls`."""
+    from databricks.sdk.service.settings import (  # noqa: I001
+        CustomerFacingIngressNetworkPolicyPublicAccess as PublicAccess,
+        CustomerFacingIngressNetworkPolicyPublicAccessRestrictionMode as RestrictionMode,
+    )
+
+    return PublicAccess(restriction_mode=RestrictionMode.RESTRICTED_ACCESS)
 
 
 def assemble_ingress(public_access=None, private_access=None, cross_workspace_access=None):

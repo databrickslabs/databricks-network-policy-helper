@@ -86,22 +86,28 @@ def test_validate_apply_ok_single_scopes_with_id():
 
 
 def test_validate_disable_ip_acls_noop_when_disabled():
-    # not requested — never validated, regardless of create/assign.
-    validate_disable_ip_acls(False, create_policy=False, auto_assign=False)
+    # not requested — never validated, regardless of create/assign/mode.
+    validate_disable_ip_acls(False, create_policy=False, auto_assign=False, policy_mode="dry_run")
 
 
 def test_validate_disable_ip_acls_requires_create_and_assign():
     # requested without both create AND assign would leave the workspace unprotected -> reject.
     with pytest.raises(ValueError, match="creates AND assigns"):
-        validate_disable_ip_acls(True, create_policy=True, auto_assign=False)
+        validate_disable_ip_acls(True, create_policy=True, auto_assign=False, policy_mode="enforce")
     with pytest.raises(ValueError, match="creates AND assigns"):
-        validate_disable_ip_acls(True, create_policy=False, auto_assign=True)
+        validate_disable_ip_acls(True, create_policy=False, auto_assign=True, policy_mode="enforce")
     with pytest.raises(ValueError, match="creates AND assigns"):
-        validate_disable_ip_acls(True, create_policy=False, auto_assign=False)
+        validate_disable_ip_acls(True, create_policy=False, auto_assign=False, policy_mode="enforce")
 
 
-def test_validate_disable_ip_acls_ok_with_create_and_assign():
-    validate_disable_ip_acls(True, create_policy=True, auto_assign=True)
+def test_validate_disable_ip_acls_rejects_dry_run():
+    # a dry-run policy is log-only, so disabling the legacy ACLs alongside it leaves no enforced control.
+    with pytest.raises(ValueError, match="dry_run"):
+        validate_disable_ip_acls(True, create_policy=True, auto_assign=True, policy_mode="dry_run")
+
+
+def test_validate_disable_ip_acls_ok_with_create_assign_and_enforce():
+    validate_disable_ip_acls(True, create_policy=True, auto_assign=True, policy_mode="enforce")
 
 
 def test_disable_existing_ip_acls_defaults_false():

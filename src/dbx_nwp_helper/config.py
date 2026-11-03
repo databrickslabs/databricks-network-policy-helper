@@ -86,7 +86,7 @@ class IngressConfig:
     include_ipv6: bool = False
     include_account_level: bool = False
     # Also mine system.access.inbound_network for public IPs a dry-run CBI policy would have denied
-    # (access_type=DRY_RUN_DENIAL) and fold them into the allow-list candidate set. Best-effort — the
+    # (policy_outcome=DRY_RUN_DENIAL) and fold them into the allow-list candidate set. Best-effort — the
     # table exists only where network monitoring is enabled; absent/empty degrades silently.
     include_inbound_network: bool = True
     # Enrichment
@@ -117,7 +117,8 @@ class IngressConfig:
     # (set by the CLI's _reconcile_existing_ingress). Public and private are independent dimensions;
     # cross-workspace is never built, only carried forward. All held as SDK objects so
     # preview/export/apply emit them verbatim.
-    #   private_access   — a non-allow-all PAS migrated into private_access (AWS/GCP), or an existing
+    #   private_access   — the legacy private posture (endpoint PAS / no PAS = deny-all, + back-end REST)
+    #                      migrated into private_access (AWS/GCP), or an existing
     #                      CBI private_access carried forward (all clouds), or None.
     #   existing_public  — an existing restrictive CBI public_access carried forward when this run has
     #                      no observed traffic / IP ACLs of its own to build a public block from.
@@ -125,6 +126,11 @@ class IngressConfig:
     private_access: object | None = None
     existing_public: object | None = None
     existing_xws: object | None = None
+    # True when the workspace's PAS has public access DISABLED (AWS/GCP PrivateLink-only; set by the
+    # CLI's _reconcile_existing_ingress). The generated public_access is then an explicit deny-all
+    # (RESTRICTED_ACCESS, no allow rules) regardless of observed traffic / IP ACLs — those aren't in
+    # effect on a workspace that rejects all public ingress — mirroring `databricks-migrate-ip-acls`.
+    public_access_disabled: bool = False
     # Interactively pick which proposed allow rules to keep (checkbox), before they're built. On by
     # default in interactive runs; skipped under --yes / non-interactive or with --no-select-rules.
     select_rules: bool = True
@@ -218,11 +224,13 @@ def validate_export(export: str, policy_scope: str) -> None:
         )
 
 
-def validate_disable_ip_acls(disable: bool, create_policy: bool, auto_assign: bool) -> None:
+def validate_disable_ip_acls(disable: bool, create_policy: bool, auto_assign: bool, policy_mode: str) -> None:
     """--disable-existing-ip-acls turns OFF the workspace's IP access list enforcement, which is a
     live ingress control. Only permit it when the run will both *create* AND *assign* the
-    replacement CBI policy — otherwise disabling the ACL could leave the workspace with no ingress
-    protection at all."""
+    replacement CBI policy **in enforce mode** — a dry-run policy is log-only, so disabling the ACLs
+    alongside it would leave the workspace with no ingress protection at all. (The CLI may still
+    ignore the flag at run time when the generated policy inherits dry-run mode from the workspace's
+    existing CBI policy.)"""
     if not disable:
         return
     if not (create_policy and auto_assign):
@@ -231,4 +239,10 @@ def validate_disable_ip_acls(disable: bool, create_policy: bool, auto_assign: bo
             "used when the run also creates AND assigns the replacement policy (otherwise the "
             "workspace could be left with no ingress protection). Re-run with --create-policy and "
             "--auto-assign, or drop --disable-existing-ip-acls."
+        )
+    if policy_mode == "dry_run":
+        raise ValueError(
+            "--disable-existing-ip-acls with --policy-mode dry_run would leave the workspace with no "
+            "enforced ingress control (a dry-run policy is log-only). Use --policy-mode enforce, "
+            "or drop --disable-existing-ip-acls."
         )

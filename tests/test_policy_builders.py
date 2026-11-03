@@ -144,7 +144,7 @@ def test_build_private_access_block_restricted_maps_ids_and_label():
     ).as_dict()
     assert blk["restriction_mode"] == "RESTRICTED_ACCESS"
     rule = blk["allow_rules"][0]
-    assert rule["label"] == "my-pas"  # PAS name kept as the rule label verbatim
+    assert rule["label"] == "my-pas"  # an explicit label override is honoured
     assert rule["origin"]["endpoints"]["endpoint_ids"] == ["vpce-aaa", "vpce-bbb"]  # mapped as-is
 
 
@@ -156,47 +156,64 @@ def test_build_private_access_restricted_without_ids_permits_nothing():
     assert not blk.get("allow_rules")
 
 
+def test_build_private_access_default_label_is_inbound_private_endpoints():
+    # The agreed fixed name for the PAS-migrated rule (shared with migrate-ip-acls).
+    blk = policy.build_private_access_block("RESTRICTED_ACCESS", ["vpce-a"]).as_dict()
+    assert blk["allow_rules"][0]["label"] == "Inbound private endpoints"
+    assert policy.INBOUND_PRIVATE_LABEL == "Inbound private endpoints"
+    assert policy.BACKEND_PRIVATE_LABEL == "Classic compute REST API endpoint"
+
+
 def test_build_private_access_restricted_includes_backend_endpoints():
     # A RESTRICTED_ACCESS private block gates ALL private ingress, so the workspace's back-end
-    # PrivateLink endpoints (relay + REST — not in the PAS) must ride alongside the front-end ones.
+    # PrivateLink REST API endpoint (not in the PAS) must ride alongside the front-end ones, as its
+    # own "Classic compute REST API endpoint" rule.
     blk = policy.build_private_access_block(
-        "RESTRICTED_ACCESS", ["vpce-frontend"], label="corp-pas",
-        backend_endpoint_ids=["vpce-relay", "vpce-rest"],
+        "RESTRICTED_ACCESS",
+        ["vpce-frontend"],
+        backend_endpoint_ids=["vpce-rest"],
     ).as_dict()
     rules = blk["allow_rules"]
-    assert rules[0]["label"] == "corp-pas"  # front-end verbatim
+    assert rules[0]["label"] == "Inbound private endpoints"
     assert rules[0]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-frontend"]
-    assert rules[1]["label"] == "back-end PrivateLink (data-plane relay + REST)"
-    assert rules[1]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-relay", "vpce-rest"]
+    assert rules[1]["label"] == "Classic compute REST API endpoint"
+    assert rules[1]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-rest"]
 
 
 def test_build_private_access_backend_deduped_against_frontend():
     # a shared endpoint (in both the PAS and the network config) isn't listed twice
     blk = policy.build_private_access_block(
-        "RESTRICTED_ACCESS", ["vpce-shared"], label="pas",
-        backend_endpoint_ids=["vpce-shared", "vpce-relay"],
+        "RESTRICTED_ACCESS",
+        ["vpce-shared"],
+        backend_endpoint_ids=["vpce-shared", "vpce-rest"],
     ).as_dict()
-    assert blk["allow_rules"][1]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-relay"]  # shared dropped
+    assert blk["allow_rules"][1]["origin"]["endpoints"]["endpoint_ids"] == ["vpce-rest"]  # shared dropped
 
 
 def test_build_private_access_allow_all_ignores_backend_endpoints():
     # ALLOW_ALL_REGISTERED_ENDPOINTS already permits every registered endpoint — no rules added
     blk = policy.build_private_access_block(
-        "ALLOW_ALL_REGISTERED_ENDPOINTS", backend_endpoint_ids=["vpce-relay"]
+        "ALLOW_ALL_REGISTERED_ENDPOINTS", backend_endpoint_ids=["vpce-rest"]
     ).as_dict()
     assert blk["restriction_mode"] == "ALLOW_ALL_REGISTERED_ENDPOINTS"
     assert not blk.get("allow_rules")
 
 
 def test_build_private_access_backend_only_when_no_frontend():
-    # endpoint-scoped PAS that allows nothing front-end, but the workspace has back-end PrivateLink:
-    # the back-end rule still rides (otherwise the restricted block would block the data plane).
+    # No PAS (or an endpoint-scoped PAS that allows nothing front-end), but the workspace has back-end
+    # PrivateLink: the REST rule still rides (otherwise the restricted block would block classic compute).
     blk = policy.build_private_access_block(
-        "RESTRICTED_ACCESS", [], label="pas", backend_endpoint_ids=["vpce-relay"]
+        "RESTRICTED_ACCESS", [], backend_endpoint_ids=["vpce-rest"]
     ).as_dict()
     rules = blk["allow_rules"]
     assert len(rules) == 1
-    assert rules[0]["label"] == "back-end PrivateLink (data-plane relay + REST)"
+    assert rules[0]["label"] == "Classic compute REST API endpoint"
+
+
+def test_build_deny_all_public_block_has_no_allow_rules():
+    blk = policy.build_deny_all_public_block().as_dict()
+    assert blk["restriction_mode"] == "RESTRICTED_ACCESS"
+    assert not blk.get("allow_rules") and not blk.get("deny_rules")
 
 
 def test_assemble_ingress_composes_independent_sub_blocks():
