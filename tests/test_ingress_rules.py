@@ -567,3 +567,29 @@ def test_ingress_block_preserves_existing_public_when_nothing_to_build():
     assert blk.public_access is cfg.existing_public  # preserved, not rebuilt
     assert blk.private_access is cfg.private_access
     assert blk.cross_workspace_access is cfg.existing_xws
+
+
+def test_ingress_block_deny_all_public_when_pas_public_disabled():
+    # PAS public access disabled (PrivateLink-only): the public block is an explicit deny-all even when
+    # observed-traffic / IP-ACL allow specs exist — they aren't in effect on such a workspace — and the
+    # preview still emits a block (so nothing silently falls back to CBI's FULL_ACCESS default).
+    from dbx_nwp_helper.core import policy
+
+    cfg = IngressConfig(public_access_disabled=True)
+    cfg.private_access = policy.build_private_access_block("RESTRICTED_ACCESS", ["vpce-fe"])
+    allow = [
+        {
+            "label": "stale",
+            "cidrs": ["1.2.3.4/32"],
+            "destination": "all_destinations",
+            "identity_type": "ALL_USERS",
+            "identities": [],
+        }
+    ]
+    blk = rules._ingress_block(allow, [], cfg).as_dict()
+    assert blk["public_access"]["restriction_mode"] == "RESTRICTED_ACCESS"
+    assert not blk["public_access"].get("allow_rules")  # deny-all, the stale allow spec is dropped
+    assert blk["private_access"]["restriction_mode"] == "RESTRICTED_ACCESS"
+    # preview_blocks emits the target even with no public specs at all
+    prev = rules.preview_blocks({ALL_WORKSPACES: {"allow": [], "deny": []}}, cfg)
+    assert prev[ALL_WORKSPACES]["ingress_dry_run"]["public_access"]["restriction_mode"] == "RESTRICTED_ACCESS"

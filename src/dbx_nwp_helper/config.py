@@ -86,7 +86,7 @@ class IngressConfig:
     include_ipv6: bool = False
     include_account_level: bool = False
     # Also mine system.access.inbound_network for public IPs a dry-run CBI policy would have denied
-    # (access_type=DRY_RUN_DENIAL) and fold them into the allow-list candidate set. Best-effort — the
+    # (policy_outcome=DRY_RUN_DENIAL) and fold them into the allow-list candidate set. Best-effort — the
     # table exists only where network monitoring is enabled; absent/empty degrades silently.
     include_inbound_network: bool = True
     # Enrichment
@@ -126,6 +126,11 @@ class IngressConfig:
     private_access: object | None = None
     existing_public: object | None = None
     existing_xws: object | None = None
+    # True when the workspace's PAS has public access DISABLED (AWS/GCP PrivateLink-only; set by the
+    # CLI's _reconcile_existing_ingress). The generated public_access is then an explicit deny-all
+    # (RESTRICTED_ACCESS, no allow rules) regardless of observed traffic / IP ACLs — those aren't in
+    # effect on a workspace that rejects all public ingress — mirroring `databricks-migrate-ip-acls`.
+    public_access_disabled: bool = False
     # Interactively pick which proposed allow rules to keep (checkbox), before they're built. On by
     # default in interactive runs; skipped under --yes / non-interactive or with --no-select-rules.
     select_rules: bool = True

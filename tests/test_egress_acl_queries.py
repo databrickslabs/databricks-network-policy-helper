@@ -860,6 +860,14 @@ def test_plan_from_pas_endpoint_level_keeps_ids_with_fixed_label():
     assert plan.label == "Inbound private endpoints"  # fixed agreed label, not the PAS name
 
 
+def test_pas_public_access_enabled_defaults_true_when_unset():
+    mk = lambda v: type("PAS", (), {"public_access_enabled": v})()  # noqa: E731
+    assert acl_core.pas_public_access_enabled(mk(None)) is True
+    assert acl_core.pas_public_access_enabled(object()) is True  # attribute absent
+    assert acl_core.pas_public_access_enabled(mk(True)) is True
+    assert acl_core.pas_public_access_enabled(mk(False)) is False
+
+
 def test_plan_without_pas_is_restricted_with_no_endpoints():
     # No PAS on AWS/GCP = private access with no endpoints: a deny-all private block, not allow-all.
     plan = acl_core.plan_without_pas()
@@ -947,12 +955,12 @@ def test_existing_cbi_ingress_copies_restrictive_subblocks_only():
 
     acl_core_patched = acl_mod
     # assigned_policy returns (id, pol); patch it for this call
-    orig = acl_core_patched.assigned_policy
-    acl_core_patched.assigned_policy = lambda a, w: ("p1", pol)
+    orig = acl_core_patched.assigned_policy_state
+    acl_core_patched.assigned_policy_state = lambda a, w: ("p1", pol, None)
     try:
         pid, pub, priv, xws = acl_core.existing_cbi_ingress(object(), 42)
     finally:
-        acl_core_patched.assigned_policy = orig
+        acl_core_patched.assigned_policy_state = orig
     assert pid == "p1"
     assert pub is not None  # restrictive public carried
     assert priv is None  # permissive private dropped
@@ -986,14 +994,54 @@ def test_existing_cbi_state_reports_mode_of_restrictive_block(monkeypatch):
         (types.SimpleNamespace(ingress=None, ingress_dry_run=permissive), None),
     ]
     for pol, want in cases:
-        monkeypatch.setattr(acl_core, "assigned_policy", lambda a, w, pol=pol: ("p1", pol))
-        pid, pub, _priv, _xws, mode = acl_core.existing_cbi_state(object(), 42)
-        assert pid == "p1"
+        monkeypatch.setattr(acl_core, "assigned_policy_state", lambda a, w, pol=pol: ("p1", pol, None))
+        pid, pub, _priv, _xws, mode, err = acl_core.existing_cbi_state(object(), 42)
+        assert pid == "p1" and err is None
         assert mode == want
         assert (pub is not None) == (want is not None)
     # the 4-tuple wrapper still works for callers that don't need the mode
-    monkeypatch.setattr(acl_core, "assigned_policy", lambda a, w: ("p1", cases[0][0]))
+    monkeypatch.setattr(acl_core, "assigned_policy_state", lambda a, w: ("p1", cases[0][0], None))
     assert len(acl_core.existing_cbi_ingress(object(), 42)) == 4
+    # a read failure is reported, not disguised as "nothing restrictive"
+    monkeypatch.setattr(acl_core, "assigned_policy_state", lambda a, w: (None, None, "ReadTimeout: x"))
+    assert acl_core.existing_cbi_state(object(), 42) == (None, None, None, None, None, "ReadTimeout: x")
+
+
+def test_assigned_policy_state_distinguishes_unreadable_from_unassigned(monkeypatch):
+    monkeypatch.setattr(acl_core, "ASSIGNED_POLICY_RETRY_DELAY_SECONDS", 0)
+    calls = {"n": 0}
+
+    class _WNC:
+        def get_workspace_network_option_rpc(self, workspace_id):
+            calls["n"] += 1
+            raise RuntimeError("503 upstream")
+
+    acct = type("Acct", (), {"workspace_network_configuration": _WNC()})()
+    pid, pol, err = acl_core.assigned_policy_state(acct, 42)
+    assert (pid, pol) == (None, None)
+    assert err and "RuntimeError" in err and "503" in err
+    assert calls["n"] == 2  # one retry
+    # the lenient wrapper still returns (None, None), hiding the error (callers on write paths must
+    # use assigned_policy_state)
+    assert acl_core.assigned_policy(acct, 42) == (None, None)
+    # unassigned → no error
+    pid, pol, err = acl_core.assigned_policy_state(_policy_account(None, None), 42)
+    assert (pid, pol, err) == (None, None, None)
+    # a failure on the second (policy) read is also reported after a retry
+    calls["n"] = 0
+
+    class _NP:
+        def get_network_policy_rpc(self, network_policy_id):
+            calls["n"] += 1
+            raise RuntimeError("timeout")
+
+    class _WNC2:
+        def get_workspace_network_option_rpc(self, workspace_id):
+            return type("O", (), {"network_policy_id": "p1"})()
+
+    acct2 = type("Acct", (), {"workspace_network_configuration": _WNC2(), "network_policies": _NP()})()
+    pid, pol, err = acl_core.assigned_policy_state(acct2, 42)
+    assert (pid, pol) == (None, None) and "timeout" in err and calls["n"] == 2
 
 
 def _policy_account(assigned_policy_id, policy_obj):
@@ -1101,6 +1149,19 @@ def test_denied_requests_query_filters_403():
     q = queries.denied_requests(14)
     assert "IpAccessDenied" in q and "status_code = 403" in q
     assert "INTERVAL 14 DAYS" in q
+    assert "workspace_id AS STRING) = " not in q  # unscoped (all_workspaces / per_workspace)
+
+
+def test_denied_and_inbound_queries_scope_to_current_workspace():
+    # The system tables are account-wide across the metastore, so current_workspace scope must
+    # restrict the denied views and the dry-run candidates to this workspace's rows — otherwise other
+    # workspaces' denials show up here (and could become deny rules via --deny-denied-ips).
+    pred = "CAST(workspace_id AS STRING) = '7474655007013745'"
+    assert pred in queries.denied_requests(14, only_workspace_id=7474655007013745)
+    assert pred in queries.inbound_network_denied(14, only_workspace_id=7474655007013745)
+    assert pred in queries.candidate_ips_from_inbound_network(14, 1, only_workspace_id=7474655007013745)
+    assert "workspace_id AS STRING) = " not in queries.inbound_network_denied(14)
+    assert "workspace_id AS STRING) = " not in queries.candidate_ips_from_inbound_network(14)
 
 
 def test_inbound_network_denied_query_shape():
@@ -1108,7 +1169,10 @@ def test_inbound_network_denied_query_shape():
     assert "system.access.inbound_network" in q
     assert "source.ip AS source_ip" in q  # the CBI source IP lives in the source struct
     assert "INTERVAL 21 DAYS" in q
-    assert "access_type = 'DROP'" in q  # only enforced denials feed the recently-denied view
+    # the table's outcome column is policy_outcome (DENIED / DRY_RUN_DENIAL / ALLOWED) — there is no
+    # access_type column, so the old filter made the query fail (and be swallowed) on every run
+    assert "policy_outcome = 'DENIED'" in q  # only enforced denials feed the recently-denied view
+    assert "access_type" not in q
     assert "DRY_RUN_DENIAL" not in q  # dry-run would-be-denials are candidates, not denials
     # same output columns as denied_requests(), so the two frames union cleanly
     for col in ("denied_events", "principals", "principal_list", "first_denied", "last_denied"):
@@ -1118,7 +1182,8 @@ def test_inbound_network_denied_query_shape():
 def test_candidate_ips_from_inbound_network_query_shape():
     q = queries.candidate_ips_from_inbound_network(14, min_events=3)
     assert "system.access.inbound_network" in q
-    assert "access_type = 'DRY_RUN_DENIAL'" in q  # would-be-denied under a dry-run policy
+    assert "policy_outcome = 'DRY_RUN_DENIAL'" in q  # would-be-denied under a dry-run policy
+    assert "access_type" not in q
     assert "INTERVAL 14 DAYS" in q
     assert "HAVING COUNT(*) >= 3" in q
     # shaped like frequent_public_ips so the rows merge into the candidate set

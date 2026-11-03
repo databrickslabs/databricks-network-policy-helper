@@ -106,6 +106,14 @@ def plan_from_pas(pas) -> PrivateAccessPlan:
     return PrivateAccessPlan(restriction_mode="ALLOW_ALL_REGISTERED_ENDPOINTS", source_pas_id=pas_id)
 
 
+def pas_public_access_enabled(pas) -> bool:
+    """The PAS public-internet toggle. A PAS object may carry public_access_enabled=None (field present
+    but unset) — treat unknown as public-ENABLED (the as-is default): never infer "PrivateLink-only /
+    deny-all public" from a missing value. Mirrors `databricks-migrate-ip-acls`."""
+    pae = getattr(pas, "public_access_enabled", None)
+    return True if pae is None else bool(pae)
+
+
 def plan_without_pas() -> PrivateAccessPlan:
     """The PrivateAccessPlan for an AWS/GCP workspace with NO Private Access Settings attached. Such a
     workspace accepts no front-end private endpoints today, so the faithful CBI equivalent is a
@@ -217,24 +225,30 @@ def _active_ingress(pol) -> tuple[object | None, str | None]:
 
 def existing_cbi_state(
     account, workspace_id
-) -> tuple[str | None, object | None, object | None, object | None, str | None]:
+) -> tuple[str | None, object | None, object | None, object | None, str | None, str | None]:
     """The workspace's currently-assigned CBI policy's ingress sub-blocks, deep-copied so they can be
     carried verbatim into the generated policy for any dimension this run doesn't itself produce,
     plus the enforcement mode those rules currently run in. Returns (assigned_policy_id,
-    public_access, private_access, cross_workspace_access, mode); (id, None, None, None, None) when
-    nothing is assigned / unreadable / nothing restrictive. Only *restrictive* sub-blocks are
-    returned — a permissive one (FULL_ACCESS / ALLOW_ALL_REGISTERED_ENDPOINTS, e.g. the baseline
-    default-policy) is equivalent to omitting it, so dropping it keeps the generated policy clean and
-    never silently re-adds an allow-all block. `mode` is "enforce" / "dry_run" when the assigned
-    policy has a restrictive ingress block (the mode the generated policy must inherit, so carrying
-    those rules forward never silently promotes dry-run rules to blocking or demotes enforced ones to
-    log-only), else None. Best-effort."""
-    policy_id, pol = assigned_policy(account, workspace_id)
+    public_access, private_access, cross_workspace_access, mode, read_error):
+      * read_error is None when the account API was read successfully — then the other fields are
+        authoritative ((id, None, None, None, None, None) = assigned but nothing restrictive;
+        (None, …) = nothing assigned);
+      * read_error is a short message when the assigned policy could NOT be read; every other field
+        is None and MUST NOT be interpreted as "nothing restrictive" (see assigned_policy_state).
+    Only *restrictive* sub-blocks are returned — a permissive one (FULL_ACCESS /
+    ALLOW_ALL_REGISTERED_ENDPOINTS, e.g. the baseline default-policy) is equivalent to omitting it,
+    so dropping it keeps the generated policy clean and never silently re-adds an allow-all block.
+    `mode` is "enforce" / "dry_run" when the assigned policy has a restrictive ingress block (the mode
+    the generated policy must inherit, so carrying those rules forward never silently promotes dry-run
+    rules to blocking or demotes enforced ones to log-only), else None."""
+    policy_id, pol, read_error = assigned_policy_state(account, workspace_id)
+    if read_error:
+        return None, None, None, None, None, read_error
     if pol is None:
-        return policy_id, None, None, None, None
+        return policy_id, None, None, None, None, None
     ing, mode = _active_ingress(pol)
     if ing is None:
-        return policy_id, None, None, None, None
+        return policy_id, None, None, None, None, None
     pub = getattr(ing, "public_access", None)
     priv = getattr(ing, "private_access", None)
     xws = getattr(ing, "cross_workspace_access", None)
@@ -244,6 +258,7 @@ def existing_cbi_state(
         copy.deepcopy(priv) if _block_restrictive(priv) else None,
         copy.deepcopy(xws) if _block_restrictive(xws) else None,
         mode,
+        None,
     )
 
 
@@ -314,22 +329,55 @@ def egress_content(policy) -> list[str]:
     return [f"{'enforced' if egress_enforced(egr) else 'dry-run'} egress: restricted destinations"]
 
 
+# Pause between the two attempts to read the assigned policy (transient account-API errors — e.g.
+# right after a policy write / rebind — usually clear within a second or two).
+ASSIGNED_POLICY_RETRY_DELAY_SECONDS = 2.0
+
+
+def assigned_policy_state(
+    account, workspace_id, retries: int = 1
+) -> tuple[str | None, object | None, str | None]:
+    """(assigned_policy_id, full policy object, read_error) for the workspace.
+
+    * (id, policy, None)   — read OK, a policy is assigned;
+    * (None, None, None)   — read OK, nothing is assigned (the account default-policy governs);
+    * (None, None, "<err>") — the account API could NOT be read (after `retries` retries).
+
+    Callers MUST treat the third shape differently from the second: "unreadable" is not "nothing
+    restrictive is assigned". A swallowed read failure here used to make the conflict gate and mode
+    inheritance silently pass — a transient error could have let a run replace a restrictive
+    policy. Create-and-assign paths should refuse to proceed on a read error; propose-only may
+    continue with a warning."""
+    import time
+
+    last: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            opt = account.workspace_network_configuration.get_workspace_network_option_rpc(
+                workspace_id=int(workspace_id)
+            )
+            policy_id = getattr(opt, "network_policy_id", None)
+            if not policy_id:
+                return None, None, None
+            return (
+                policy_id,
+                account.network_policies.get_network_policy_rpc(network_policy_id=policy_id),
+                None,
+            )
+        except Exception as e:  # noqa: BLE001 - reported to the caller, never swallowed
+            last = e
+            if attempt < retries:
+                time.sleep(ASSIGNED_POLICY_RETRY_DELAY_SECONDS)
+    detail = " ".join(str(last).split())[:200] if last else "unknown error"
+    return None, None, f"{type(last).__name__ if last else 'Error'}: {detail}"
+
+
 def assigned_policy(account, workspace_id) -> tuple[str | None, object | None]:
-    """(assigned_policy_id, full policy object) for the workspace — (id, None) if the policy read
-    failed, (None, None) if nothing is assigned. Best-effort."""
-    try:
-        opt = account.workspace_network_configuration.get_workspace_network_option_rpc(
-            workspace_id=int(workspace_id)
-        )
-        policy_id = getattr(opt, "network_policy_id", None)
-    except Exception:  # noqa: BLE001
-        return None, None
-    if not policy_id:
-        return None, None
-    try:
-        return policy_id, account.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
-    except Exception:  # noqa: BLE001
-        return policy_id, None
+    """assigned_policy_state() without the error — (assigned_policy_id, policy); (None, None) when
+    nothing is assigned OR the read failed. Prefer assigned_policy_state() wherever the distinction
+    matters (it always does on a write path)."""
+    policy_id, pol, _err = assigned_policy_state(account, workspace_id)
+    return policy_id, pol
 
 
 def disable_ip_access_lists(workspace_client, note: Note = lambda _m: None) -> bool:

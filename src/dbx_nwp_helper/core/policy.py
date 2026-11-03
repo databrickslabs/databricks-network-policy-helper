@@ -186,6 +186,19 @@ def build_public_access_block(allow: list[dict], deny: list[dict], note: Note = 
     )
 
 
+def build_deny_all_public_block():
+    """A public_access block that permits NO public ingress — RESTRICTED_ACCESS with no allow rules.
+    Written when the workspace's PAS has public access disabled (PrivateLink-only), so the CBI policy
+    recreates that posture rather than falling back to the FULL_ACCESS default once CBI is the source
+    of truth. Mirrors `databricks-migrate-ip-acls`."""
+    from databricks.sdk.service.settings import (  # noqa: I001
+        CustomerFacingIngressNetworkPolicyPublicAccess as PublicAccess,
+        CustomerFacingIngressNetworkPolicyPublicAccessRestrictionMode as RestrictionMode,
+    )
+
+    return PublicAccess(restriction_mode=RestrictionMode.RESTRICTED_ACCESS)
+
+
 def assemble_ingress(public_access=None, private_access=None, cross_workspace_access=None):
     """Assemble a CustomerFacingIngressNetworkPolicy from independently built-or-preserved sub-blocks
     (public / private / cross-workspace). Any may be None (omitted). Public and private ingress are

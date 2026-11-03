@@ -210,6 +210,12 @@ def test_build_private_access_backend_only_when_no_frontend():
     assert rules[0]["label"] == "Classic compute REST API endpoint"
 
 
+def test_build_deny_all_public_block_has_no_allow_rules():
+    blk = policy.build_deny_all_public_block().as_dict()
+    assert blk["restriction_mode"] == "RESTRICTED_ACCESS"
+    assert not blk.get("allow_rules") and not blk.get("deny_rules")
+
+
 def test_assemble_ingress_composes_independent_sub_blocks():
     pub = policy.build_public_access_block([_allow()], [])
     priv = policy.build_private_access_block("ALLOW_ALL_REGISTERED_ENDPOINTS")

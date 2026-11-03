@@ -215,7 +215,9 @@ def build_rules(
     # have a block to carry/migrate into some dimension (private_access, an existing public to
     # preserve, or cross-workspace), seed a single target so those blocks are still built, previewed,
     # and applied.
-    if not policies and (cfg.private_access or cfg.existing_public or cfg.existing_xws):
+    if not policies and (
+        cfg.private_access or cfg.existing_public or cfg.existing_xws or cfg.public_access_disabled
+    ):
         policies[ALL_WORKSPACES] = {"allow": [], "deny": []}
 
     if cfg.policy_scope == "per_workspace" and len(policies) > MAX_POLICIES_PER_ACCOUNT:
@@ -371,13 +373,17 @@ def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note
 def _ingress_block(allow, deny, cfg: IngressConfig, note: Note = lambda _m: None):
     """Compose the generated policy's ingress from independent dimensions, so preview / export / apply
     all emit the same shape:
-      * public — built net-new from this target's observed-traffic + IP-ACL specs; when there are
-        none, an existing restrictive CBI public_access is carried forward (cfg.existing_public);
+      * public — an explicit deny-all when the PAS has public access disabled
+        (cfg.public_access_disabled — PrivateLink-only, so no public rule applies); else built net-new
+        from this target's observed-traffic + IP-ACL specs; when there are none, an existing
+        restrictive CBI public_access is carried forward (cfg.existing_public);
       * private — the migrated legacy private posture (PAS / no PAS / back-end REST) or an existing
         private_access carried forward
         (cfg.private_access);
       * cross-workspace — never built, always carried forward verbatim (cfg.existing_xws)."""
-    if allow or deny:
+    if cfg.public_access_disabled:
+        public = policy.build_deny_all_public_block()  # PAS public disabled → nothing public, ever
+    elif allow or deny:
         public = policy.build_public_access_block(allow, deny, note)
     else:
         public = cfg.existing_public  # nothing to build → preserve any existing restrictive public
@@ -437,7 +443,14 @@ def preview_blocks(policies: dict, cfg: IngressConfig, note: Note = lambda _m: N
     out = {}
     for tgt in sorted(policies, key=str):
         allow, deny = policies[tgt]["allow"], policies[tgt]["deny"]
-        if not (allow or deny or cfg.private_access or cfg.existing_public or cfg.existing_xws):
+        if not (
+            allow
+            or deny
+            or cfg.private_access
+            or cfg.existing_public
+            or cfg.existing_xws
+            or cfg.public_access_disabled
+        ):
             continue
         block = _ingress_block(allow, deny, cfg, note)
         out[tgt] = {cfg.policy_mode_target: block.as_dict()}

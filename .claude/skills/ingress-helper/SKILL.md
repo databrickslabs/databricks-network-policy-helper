@@ -124,7 +124,9 @@ collides with a **restrictive** existing CBI block in that same dimension (enfor
   PAS at all, or a back-end REST API endpoint) and the assigned policy has a restrictive
   private_access. An account-level allow-all PAS never conflicts — the stricter existing block is kept.
 
-An allow-all policy (e.g. the account's `default-policy`) is fine. It also guards the **egress**
+An allow-all policy (e.g. the account's `default-policy`) is fine. The checks **fail closed**: if the
+assigned policy can't be read, a create/assign run aborts rather than assuming nothing restrictive is
+there. It also guards the **egress**
 direction: creating under a **new** id that would rebind the workspace and drop an existing restrictive
 egress aborts on an enforced egress (warns on a dry-run one) — use `add_to_existing` to keep it.
 Skipped for `per_workspace` and `add_to_existing`.
@@ -148,9 +150,14 @@ independent — each is built/migrated or **carried forward** from the workspace
   the generated policy **inherits that policy's enforcement mode** and `--policy-mode` is ignored
   (warned); under an inherited dry-run, `--disable-existing-ip-acls` is ignored too. With nothing
   restrictive assigned, `--policy-mode` applies as given.
+- **PAS public access disabled** (AWS/GCP PrivateLink-only) → the public block is an explicit
+  **deny-all** (`RESTRICTED_ACCESS`, no allow rules); IP ACLs aren't migrated and observed-traffic
+  rules are shown but not written (public ingress is closed today).
 
-Reading the PAS / assigned policy needs account-admin auth, so this is a no-op on a propose-only run
-without one. (Mirrors the `databricks-migrate-ip-acls` sibling's existing-policy handling.)
+Reading the PAS / assigned policy needs account-admin auth. A create/assign run resolves it up front;
+a propose-only run tries best-effort (account id from the workspace profile + a matching account
+profile, or `--account-profile`) so the preview/export match the apply, and says so when it can't.
+(Mirrors the `databricks-migrate-ip-acls` sibling's existing-policy handling.)
 
 `add_to_existing` updates only the ingress block and **leaves an existing egress as-is**; a brand-new
 policy gets a permissive `FULL_ACCESS` egress default (and, symmetrically, the egress helper leaves
@@ -177,11 +184,11 @@ always included.
 
 The CLI also surfaces requests **recently blocked inbound** — both IP-access-list 403s
 (`system.access.audit`) and **enforced** CBI network-policy denials (`system.access.inbound_network`
-`access_type=DROP`, when that table is available/non-empty; it degrades cleanly if not). Pass
+`policy_outcome=DENIED`, when that table is available/non-empty; it degrades cleanly if not). Pass
 `--deny-denied-ips` to turn those source IPs into explicit deny rules (labelled `deny-recently-denied`).
 
 **Dry-run CBI denials as allow-list candidates.** When `system.access.inbound_network` is available,
-the public IPs a *dry-run* CBI policy would have blocked (`access_type=DRY_RUN_DENIAL`) are folded
+the public IPs a *dry-run* CBI policy would have blocked (`policy_outcome=DRY_RUN_DENIAL`) are folded
 into the candidate set — the inbound clients your log-only allow-list doesn't yet cover. So you can
 stand up a restricted dry-run ingress policy, let it observe, and complete the allow-list from what it
 would have denied. On by default (best-effort); `--no-include-inbound-network` opts out.

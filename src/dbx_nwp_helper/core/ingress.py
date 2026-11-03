@@ -105,13 +105,15 @@ def analyze(
         )
 
     # Also mine system.access.inbound_network for public IPs a *dry-run* CBI policy WOULD have denied
-    # (access_type=DRY_RUN_DENIAL): inbound clients the current log-only allow-list doesn't cover yet,
+    # (policy_outcome=DRY_RUN_DENIAL): inbound clients the current log-only allow-list doesn't cover yet,
     # so they're prime allow-list candidates. Best-effort (the table exists only where network
     # monitoring is on) and folded in as *new* IPs only — IPs already seen in the audit candidates keep
     # their richer audit row. The enforced-denial (DROP) rows feed the recently-denied view instead.
     if cfg.include_inbound_network:
         with _phase("Checking system.access.inbound_network for dry-run-denied candidate IPs…"):
-            inbound_candidates = _read_inbound_network_candidates(sql_conn, cfg.lookback_days, cfg.min_events)
+            inbound_candidates = _read_inbound_network_candidates(
+                sql_conn, cfg.lookback_days, cfg.min_events, only_workspace_id=only_ws
+            )
         if inbound_candidates is not None and not inbound_candidates.empty:
             candidates, added = _merge_candidates(candidates, inbound_candidates, cfg.include_ipv6)
             if added:
@@ -136,11 +138,13 @@ def analyze(
 
     with _phase("Reading the workspace IP access list + recently denied requests…"):
         ip_acls = _read_ip_acls(workspace_client)
-        denied = sql.query(sql_conn, queries.denied_requests(cfg.lookback_days, use_inet=use_inet))
+        denied = sql.query(
+            sql_conn, queries.denied_requests(cfg.lookback_days, use_inet=use_inet, only_workspace_id=only_ws)
+        )
         # Also fold in CBI-policy denials (system.access.inbound_network), so the "recently denied"
         # view flags everything blocked inbound — IP-ACL 403s AND network-policy DENY/DENY_DRY_RUN —
         # not just IP-ACL denials. Best-effort: the table exists only where network monitoring is on.
-        inbound_denied = _read_inbound_network_denied(sql_conn, cfg.lookback_days)
+        inbound_denied = _read_inbound_network_denied(sql_conn, cfg.lookback_days, only_workspace_id=only_ws)
         if inbound_denied is not None and not inbound_denied.empty and "source_ip" in inbound_denied.columns:
             denied = _merge_denied(denied, inbound_denied)
             on_step(
@@ -219,19 +223,23 @@ def analyze(
     )
 
 
-def _read_inbound_network_denied(sql_conn, lookback_days: int):
+def _read_inbound_network_denied(sql_conn, lookback_days: int, only_workspace_id: int | None = None):
     """CBI-policy inbound denials from system.access.inbound_network, or None if that table isn't
     available (it exists only where network monitoring is enabled). Best-effort: any query error —
     most commonly TABLE_OR_VIEW_NOT_FOUND — degrades to None so the audit-based denials still show."""
     from .. import queries, sql
 
     try:
-        return sql.query(sql_conn, queries.inbound_network_denied(lookback_days))
+        return sql.query(
+            sql_conn, queries.inbound_network_denied(lookback_days, only_workspace_id=only_workspace_id)
+        )
     except Exception:  # noqa: BLE001 - table absent / not enabled / no access → just skip it
         return None
 
 
-def _read_inbound_network_candidates(sql_conn, lookback_days: int, min_events: int):
+def _read_inbound_network_candidates(
+    sql_conn, lookback_days: int, min_events: int, only_workspace_id: int | None = None
+):
     """Dry-run-denied inbound public IPs from system.access.inbound_network as allow-list candidates,
     or None if that table isn't available. Best-effort, mirroring _read_inbound_network_denied: any
     query error (most commonly TABLE_OR_VIEW_NOT_FOUND) degrades to None so the audit candidates
@@ -239,7 +247,12 @@ def _read_inbound_network_candidates(sql_conn, lookback_days: int, min_events: i
     from .. import queries, sql
 
     try:
-        return sql.query(sql_conn, queries.candidate_ips_from_inbound_network(lookback_days, min_events))
+        return sql.query(
+            sql_conn,
+            queries.candidate_ips_from_inbound_network(
+                lookback_days, min_events, only_workspace_id=only_workspace_id
+            ),
+        )
     except Exception:  # noqa: BLE001 - table absent / not enabled / no access → just skip it
         return None
 

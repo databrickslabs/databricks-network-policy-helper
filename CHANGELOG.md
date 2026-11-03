@@ -42,8 +42,34 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
   silently started blocking). Under an inherited dry-run, `--disable-existing-ip-acls` is ignored
   with a warning (the legacy IP access lists can't be turned off while the only policy is log-only).
   When nothing restrictive is assigned, `--policy-mode` applies as before.
+- **A PAS with public access disabled now becomes an explicit deny-all public block (AWS/GCP).** A
+  PrivateLink-only workspace rejects all public ingress today, so the generated `public_access` is
+  `RESTRICTED_ACCESS` with no allow rules instead of being omitted (= CBI's FULL_ACCESS default, which
+  would open the workspace once CBI is the source of truth). Its IP access lists aren't migrated and
+  observed-traffic public rules are shown for review but not written. Mirrors `dbx-migrate-ip-acls`.
+- **Propose-only runs now preview private access, carried-forward blocks and the inherited mode.**
+  Without `--create-policy` the helper builds an account client best-effort (workspace-profile account
+  id + matching account profile, or `--account-profile`) so the preview and `--export` show the same
+  policy an apply would write. Previously propose-only never read the PAS or the assigned policy, so
+  the preview silently omitted the private block.
 
 ### Fixed
+
+- **Create/assign now fails closed when the assigned network policy can't be read.** A transient
+  account-API error while reading the workspace's assigned policy was swallowed and treated as
+  "nothing assigned", which silently skipped the per-dimension conflict gate, mode inheritance and the
+  opposite-direction egress guard — a run could have replaced a restrictive policy. The read is now
+  retried once and, if it still fails, a run that would create or assign a policy aborts with the
+  error; propose-only continues with a warning that existing rules are unknown.
+- **The denied-IP views are now scoped to the current workspace.** `denied_requests` and the
+  `system.access.inbound_network` queries ignored the workspace filter, so in `current_workspace`
+  scope the "recently denied" table (and `--deny-denied-ips` deny rules) drew on every workspace in
+  the shared metastore.
+- **The `system.access.inbound_network` queries used a column that doesn't exist.** They filtered on
+  `access_type = 'DROP'` / `'DRY_RUN_DENIAL'`; the table's column is `policy_outcome` with values
+  `DENIED` / `DRY_RUN_DENIAL` / `ALLOWED`. Both queries failed on every run and the failure was
+  swallowed (the table is read best-effort), so CBI denials never appeared in the denied view and
+  `--include-inbound-network` never contributed candidates. Fixed to `policy_outcome`.
 
 - **`--disable-existing-ip-acls` is now rejected with `--policy-mode dry_run`.** It was only gated on
   `--create-policy` + `--auto-assign`, so a dry-run run could turn off the workspace's IP access lists

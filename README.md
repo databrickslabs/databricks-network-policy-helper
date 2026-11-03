@@ -401,7 +401,9 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   workspace, dropping the old policy's egress via the permissive default), they abort if that would
   drop an enforced restrictive egress — pointing you at `--policy-action add_to_existing
   --existing-policy-id <id>` to keep it. An allow-all assigned policy, or updating the same id in
-  place, is fine.
+  place, is fine. These checks **fail closed**: if the assigned policy can't be read (a transient
+  account-API error, often right after a policy write), a run that would create or assign a policy
+  aborts rather than treating the workspace as having nothing restrictive assigned.
 - **Legacy private access (PrivateLink), existing CBI, & cross-workspace.** A PrivateLink workspace
   no longer aborts ingress. Public, private and cross-workspace access are **independent dimensions**,
   each built/migrated or **carried forward** from the workspace's existing CBI policy (restrictive
@@ -433,6 +435,17 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   blocking or demote enforced ones to log-only. Under an inherited **dry-run**,
   `--disable-existing-ip-acls` is ignored too. When the existing policy has nothing restrictive
   (e.g. the account `default-policy`), `--policy-mode` applies as given.
+- **A PAS with public access disabled becomes an explicit deny-all public block.** On AWS/GCP a
+  PrivateLink-only workspace (`public_access_enabled=false` on its PAS) rejects all public ingress
+  today, so its IP access lists aren't in effect and any observed public traffic predates the toggle.
+  The generated `public_access` is `RESTRICTED_ACCESS` with no allow rules — never CBI's FULL_ACCESS
+  default — and the IP ACLs aren't migrated; observed-traffic rules are still shown for review but not
+  written. (Mirrors `databricks-migrate-ip-acls`.)
+- **Propose-only previews match the apply.** Without `--create-policy` the helper still builds an
+  account client best-effort (from `--account-id` / the workspace profile's account id and a matching
+  account profile or `--account-profile`), so the preview and `--export` include the PAS-derived
+  private block, carried-forward existing blocks and the inherited mode. If no account credentials
+  resolve it says so and previews the public rules only.
 - Requires `databricks-sdk>=0.152.0` for the network-policy dataclasses — including the
   `private_access` / `cross_workspace_access` blocks (pinned in `pyproject.toml`).
 - **Applying a policy needs account-level auth**, which is separate from workspace auth — a workspace
@@ -448,12 +461,12 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   dry-run would-be-denials — so stand up an egress policy in `dry_run` first, let it observe, then
   run `dbx-nwp-helper egress` to turn the observed destinations into an allow-list.
 - **Recently-denied inbound** combines two sources: IP-access-list 403s (`system.access.audit`) and
-  **enforced** CBI network-policy denials (`system.access.inbound_network` `access_type=DROP`, when
+  **enforced** CBI network-policy denials (`system.access.inbound_network` `policy_outcome=DENIED`, when
   that table is available — it records only denied inbound events and exists where network monitoring
   is enabled). Both are merged by source IP; the CBI source is best-effort and skipped cleanly if the
   table is absent.
 - **Dry-run CBI denials become allow-list candidates.** When `system.access.inbound_network` is
-  available, the public IPs a *dry-run* CBI policy would have blocked (`access_type=DRY_RUN_DENIAL`)
+  available, the public IPs a *dry-run* CBI policy would have blocked (`policy_outcome=DRY_RUN_DENIAL`)
   are folded into the candidate set — the inbound clients your log-only allow-list doesn't yet cover
   — so you can stand up a restricted dry-run ingress policy, observe, and complete the allow-list from
   what it would have denied. Best-effort; `--no-include-inbound-network` opts out.
