@@ -2022,8 +2022,9 @@ def test_offer_partner_exclusion_offered_on_rule_cap_too(monkeypatch, capsys):
     monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     assert cli._offer_partner_exclusion(analysis, cfg, yes=False, limits_hit=True) is True
     assert cfg.exclude_partner_cidrs is True
-    out = _plain(capsys.readouterr().out)
-    assert "1 allow rule(s) / 1 CIDR(s) are" in out and "partner-platform ranges" in out
+    out = " ".join(_plain(capsys.readouterr().out).split())  # collapse Rich's terminal wrapping
+    assert "close to hitting context-based ingress policy limits" in out
+    assert "1 allow rule(s) / 1 CIDR(s) are partner-platform ranges" in out
     assert "REMEMBER" in out and "Partner platforms" in out
 
 

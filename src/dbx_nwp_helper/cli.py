@@ -1405,10 +1405,10 @@ def _offer_partner_exclusion(analysis, cfg: IngressConfig, yes: bool, *, limits_
         return False
     console.banner(
         "info",
-        f"This policy is up against its limits, and {n_rules} allow rule(s) / {n_cidrs:,} CIDR(s) are "
-        "partner-platform ranges. Databricks offers a managed 'Partner platforms' ingress source "
-        "(account console → policy → Ingress; Beta, AWS + GCP) that tracks those IPs for you and counts "
-        "against neither the rule nor the CIDR cap.",
+        f"This policy is close to hitting context-based ingress policy limits, and {n_rules} allow "
+        f"rule(s) / {n_cidrs:,} CIDR(s) are partner-platform ranges. Databricks offers a managed "
+        "'Partner platforms' ingress source (account console → policy → Ingress; Beta, AWS + GCP) that "
+        "tracks those IPs for you and counts against neither the rule nor the CIDR cap.",
     )
     cfg.exclude_partner_cidrs = bool(
         typer.confirm(
