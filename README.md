@@ -82,19 +82,19 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 
 **Both also take** `--policy-scope current_workspace\|per_workspace\|all_workspaces`, `--policy-action create_new\|add_to_existing` + `--existing-policy-id <id>` (compose a combined policy), `--lookback-days`, `--min-events`, `--enable-rdap`, and `--select-rules`/`--no-select-rules` (interactively curate which rules/destinations to include — **on by default** in interactive runs).
 
-**Large environments (`ingress`):**
+**Large environments (`ingress`; `--uc-schema` is on `egress` too):**
 
 | Option | What it does |
 |---|---|
 | `--consolidate-rules` / `--no-consolidate-rules` | When the proposed allow rules exceed the **50-rule** cap, fold the lowest-traffic owner groups into **`Consolidated-Observed-IPs`** rule(s) so their IPs stay in the policy (only the 2,000-CIDR cap can still drop IPs). Default: **prompt** when a cap is hit; `--yes` consolidates. Partner-platform rules (Power BI / dbt / Tableau) are never folded; when a cap is hit, an interactive run also offers to leave them out in favour of the console's managed **Partner platforms** source. |
-| `--uc-schema <catalog.schema>` | **Persist the analysis to Unity Catalog.** Maintains `dbx_nwp_ingress_daily` — a per-day source-IP aggregate of `system.access.audit`, built server-side and **updated incrementally** (only the days the table lacks, plus the two most recent, are re-read) — and re-aggregates it instead of re-scanning the audit log on every run. Each run also records its proposed rules and their fate (kept / consolidated / dropped / deselected / excluded) in `dbx_nwp_ingress_suggestions`. `--refresh-persisted` rebuilds the daily table. |
+| `--uc-schema <catalog.schema>` | **Persist the analysis to Unity Catalog.** Maintains `dbx_nwp_ingress_daily` — a per-day source-IP aggregate of `system.access.audit`, built server-side and **updated incrementally** (only the days the table lacks, plus the two most recent, are re-read) — and re-aggregates it instead of re-scanning the audit log on every run. Each run also records its proposed rules and their fate (kept / consolidated / dropped / deselected / excluded) in `dbx_nwp_ingress_suggestions`. `--refresh-persisted` rebuilds the daily table. On `egress` the same flag maintains `dbx_nwp_egress_daily` (per-day destination aggregate of `system.access.outbound_network`) and `dbx_nwp_egress_suggestions`. |
 
 RDAP owner lookups are also cached on disk for 30 days (`feeds list` shows `rdap_owners`), so re-runs over the same IPs skip the slow RIR calls.
 
 **Command-specific:**
 
 - 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--block-threat-ips` (off/matched_only/all — interactive feed picker when not off), `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--include-inbound-network` (use dry-run CBI denials as allow-list candidates; on by default), `--disable-existing-ip-acls` (enforce mode only). Existing IP access lists are **auto-detected** and you're prompted (a per-entry checkbox) to migrate them; on AWS/GCP the workspace's **legacy private access posture** is likewise **auto-detected** and recreated in a `private_access` block — an endpoint-scoped PAS → its endpoints (*"Inbound private endpoints"*), **no PAS → deny-all private** (a no-PAS workspace accepts no private endpoints today), plus a *"Classic compute REST API endpoint"* rule for any back-end PrivateLink REST endpoint; an account-level PAS keeps CBI's allow-all default unless a stricter existing CBI `private_access` is already there (which wins) — no flags. If the assigned CBI policy already has restrictive public **or** private rules, the generated policy **inherits its enforcement mode** (`--policy-mode` is ignored). (Azure doesn't migrate PrivateLink.)
-- 📤 **`egress`**: `--block-threat-domains` (off/matched_only/all) — when not `off`, an interactive run then asks which feeds to use (c2intel/threatfox/urlhaus), for an abuse.ch Auth-Key when a key-gated feed is chosen (or `DBX_NWP_ABUSE_CH_AUTH_KEY`), and whether to flag popularity-allowlisted candidates; `--source-type-filter`.
+- 📤 **`egress`**: `--block-threat-domains` (off/matched_only/all) — when not `off`, an interactive run then asks which feeds to use (c2intel/threatfox/urlhaus), for an abuse.ch Auth-Key when a key-gated feed is chosen (or `DBX_NWP_ABUSE_CH_AUTH_KEY`), and whether to flag popularity-allowlisted candidates; `--source-type-filter`; `--cross-workspace-destinations` / `--no-cross-workspace-destinations` (on by default — observed egress to **other Databricks workspaces** becomes `allowed_databricks_destinations` by inferred workspace id, with a pre-checked selector); `--uc-schema` / `--refresh-persisted` (persist the outbound analysis, as for ingress).
 
 ## 🗺️ How each command flows
 
@@ -172,9 +172,10 @@ flowchart TD
     A(["dbx-nwp-helper egress"]) --> B{"Confirm target workspace?"}
     B -->|no| X1["Abort — nothing written"]
     B -->|yes| C["Resolve policy name<br/>--policy-name / prompt; blank = profile"]
-    C --> D["Analyse system.access.outbound_network<br/>denied + dry-run denials"]
-    D --> E["Classify: S3 / GCS / Azure storage + internet FQDNs<br/>RDAP owner lookup (context)"]
-    E --> TD{"--block-threat-domains?"}
+    C --> D["Analyse system.access.outbound_network<br/>(or the persisted daily table with --uc-schema)"]
+    D --> E["Classify: S3 / GCS / Azure storage + internet FQDNs<br/>RDAP owner lookup (context)<br/>invalid hostnames (e.g. 'local') excluded + flagged"]
+    E --> XW["Databricks hosts → infer destination workspace ids<br/>(Apps / AI-gateway / Azure / GCP hosts; AWS via account workspace list)<br/>→ allowed_databricks_destinations; unresolved flagged"]
+    XW --> TD{"--block-threat-domains?"}
     TD -->|"matched_only / all"| TDB["Add blocked_internet_destinations (ThreatFox)"]
     TD -->|off| LIM["Enforce limits: 100 internet / 100 storage<br/>warn + keep highest-traffic"]
     TDB --> LIM
@@ -393,6 +394,24 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
 
 ## 📝 Notes & caveats
 
+- **Egress to other Databricks workspaces (cross-workspace destinations).** The egress API rejects
+  every Databricks-domain host as an internet destination, but a policy can allow serverless egress
+  to **other workspaces by id** (`allowed_databricks_destinations`). `egress` infers those ids from
+  the observed hostnames — Databricks Apps (`<app>-<workspace_id>.aws.databricksapps.com`), AI gateway
+  (`<workspace_id>.ai-gateway…`), Azure (`adb-<workspace_id>…`) and GCP hosts carry the id; AWS
+  deployment names (`dbc-…cloud.databricks.com`) are resolved through the account API's workspace
+  list, so only workspaces in **your** account resolve — and adds them to the policy (pre-checked
+  selector interactively; `--no-cross-workspace-destinations` to flag only). Every inferred id is
+  **verified** against the workspaces this metastore / account knows (`system.access.workspaces_latest`
+  plus the account API when available); unverified ids are shown but start unticked and are never
+  added under `--yes`. A host called only by the workspace in its own name (a workspace calling its own
+  App) is same-workspace traffic and is never a destination, nor is this workspace itself. Lakebase endpoints, docs/www and other platform hosts, and other accounts'
+  workspaces stay flagged with the reason. **Both sides must agree**: each destination workspace's CBI
+  policy must also allow this workspace (its cross-workspace access must be out of compatibility
+  mode). Updating an existing policy's egress keeps any workspace ids already on it.
+- **Invalid hostnames are excluded from egress.** DNS events can carry single-label names (`local`,
+  `databricks`) or IP literals; the API rejects them as `DNS_NAME` destinations (an apply used to fail
+  with *"'local' is not a valid hostname"*). They're now excluded and listed with the reason.
 - **Policy limits, consolidation & large environments.** A CBI policy holds at most **50 ingress
   rules** and **2,000 CIDRs**. Every RDAP owner becomes its own labelled rule, so a large environment
   (hundreds of owners, thousands of IPs) hits the rule cap long before the CIDR cap. Rather than drop

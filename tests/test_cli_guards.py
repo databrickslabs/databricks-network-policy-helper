@@ -2087,3 +2087,154 @@ def test_ingress_limit_env_vars_reach_config(monkeypatch):
     assert r.exit_code == 0, r.output
     cfg = captured["cfg"]
     assert (cfg.max_rules, cfg.max_cidrs) == (80, 5000) and cfg.consolidate_rules is False
+
+
+# ------------------------------------------------------------------ 0.11.0: egress xws + name guard
+def _xws_analysis(resolved):
+    from dbx_nwp_helper.core import xws
+    from dbx_nwp_helper.core.egress import EgressAnalysis
+
+    res = xws.XwsResolution()
+    for wid, hosts, events in resolved:
+        res.resolved[wid] = {
+            "hosts": list(hosts),
+            "events": events,
+            "methods": {"apps-url"},
+            "verified": True,
+        }
+    a = EgressAnalysis(
+        observed=pd.DataFrame(), targets={"__ALL__": {"s3": {}, "gcs": {}, "azure": {}, "internet": {}}}
+    )
+    a.xws = res
+    a.xws_selected = sorted(res.resolved)
+    return a
+
+
+def test_select_xws_destinations_prunes_deselected(monkeypatch):
+    from dbx_nwp_helper.config import EgressConfig
+
+    a = _xws_analysis([(11, ["a-11.aws.databricksapps.com"], 5), (22, ["b-22.aws.databricksapps.com"], 1)])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda title, choices: [11])
+    cli._select_xws_destinations(a, EgressConfig(), yes=False)
+    assert a.xws_selected == [11]
+
+
+def test_select_xws_destinations_noop_when_off_or_yes(monkeypatch):
+    from dbx_nwp_helper.config import EgressConfig
+
+    a = _xws_analysis([(11, ["a-11.aws.databricksapps.com"], 5)])
+    monkeypatch.setattr(
+        cli, "_checkbox_keep", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt"))
+    )
+    cli._select_xws_destinations(a, EgressConfig(cross_workspace_destinations=False), yes=False)
+    cli._select_xws_destinations(a, EgressConfig(), yes=True)
+    assert a.xws_selected == [11]
+
+
+def test_note_xws_destinations_reminds_about_both_sides(capsys):
+    from dbx_nwp_helper.config import EgressConfig
+
+    a = _xws_analysis([(11, ["a-11.aws.databricksapps.com"], 5)])
+    cli._note_xws_destinations(a, EgressConfig())
+    out = _plain(capsys.readouterr().out)
+    assert "1 destination workspace(s) added" in out and "BOTH sides agree" in out
+    cli._note_xws_destinations(a, EgressConfig(cross_workspace_destinations=False))
+    assert "flagged only" in _plain(capsys.readouterr().out)
+
+
+def test_resolve_policy_name_rejects_one_letter_answer(monkeypatch, capsys):
+    import questionary
+
+    from dbx_nwp_helper.config import IngressConfig
+
+    answers = iter(["y", "my-policy"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(questionary, "text", lambda *a, **k: types.SimpleNamespace(ask=lambda: next(answers)))
+    cfg = IngressConfig()
+    conn = types.SimpleNamespace(profile="prof")
+    cli._resolve_policy_name(cfg, conn, types.SimpleNamespace(get_workspace_id=lambda: 1), yes=False)
+    assert cfg.policy_name == "my-policy"
+    assert "too short for a policy name" in _plain(capsys.readouterr().out)
+
+
+def test_resolve_policy_name_blank_still_means_default(monkeypatch):
+    import questionary
+
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(questionary, "text", lambda *a, **k: types.SimpleNamespace(ask=lambda: ""))
+    cfg = IngressConfig()
+    cli._resolve_policy_name(
+        cfg,
+        types.SimpleNamespace(profile="prof"),
+        types.SimpleNamespace(get_workspace_id=lambda: 1),
+        yes=False,
+    )
+    assert cfg.policy_name == "prof"
+
+
+def test_egress_rejects_bad_uc_schema_and_orphan_refresh():
+    r = runner.invoke(cli.app, ["egress", "--profile", "p", "--uc-schema", "nodot", "--yes"])
+    assert r.exit_code != 0 and "catalog.schema" in _plain(r.output)
+    r = runner.invoke(cli.app, ["egress", "--profile", "p", "--refresh-persisted", "--yes"])
+    assert r.exit_code != 0 and "--refresh-persisted only applies together with --uc-schema" in _plain(
+        r.output
+    )
+
+
+def test_egress_new_flags_reach_config(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(cli, "_run_egress", lambda cfg, conn, yes: captured.update(cfg=cfg))
+    r = runner.invoke(
+        cli.app,
+        [
+            "egress",
+            "--profile",
+            "p",
+            "--yes",
+            "--no-cross-workspace-destinations",
+            "--uc-schema",
+            "c.s",
+            "--refresh-persisted",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    cfg = captured["cfg"]
+    assert (
+        cfg.cross_workspace_destinations is False and cfg.uc_schema == "c.s" and cfg.refresh_persisted is True
+    )
+
+
+def test_select_xws_destinations_unticks_unverified_by_default(monkeypatch):
+    from dbx_nwp_helper.config import EgressConfig
+
+    a = _xws_analysis([(11, ["a-11.aws.databricksapps.com"], 5), (22, ["b-22.aws.databricksapps.com"], 1)])
+    a.xws.resolved[22]["verified"] = False
+    a.xws_selected = [11]
+    seen = {}
+
+    def fake_checkbox(title, choices):
+        seen["checked"] = {c.value: c.checked for c in choices}
+        return [c.value for c in choices if c.checked]  # operator presses Enter
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(cli, "_checkbox_keep", fake_checkbox)
+    cli._select_xws_destinations(a, EgressConfig(), yes=False)
+    assert seen["checked"] == {11: True, 22: False}
+    assert a.xws_selected == [11]
+
+
+def test_note_xws_destinations_warns_about_unverified(capsys):
+    from dbx_nwp_helper.config import EgressConfig
+
+    a = _xws_analysis([(11, ["a-11.aws.databricksapps.com"], 5), (22, ["b-22.aws.databricksapps.com"], 1)])
+    a.xws.resolved[22]["verified"] = False
+    a.xws_selected = [11]
+    cli._note_xws_destinations(a, EgressConfig())
+    out = " ".join(_plain(capsys.readouterr().out).split())
+    assert (
+        "1 inferred destination id(s) are not known to this metastore or account and were NOT added: 22"
+        in out
+    )

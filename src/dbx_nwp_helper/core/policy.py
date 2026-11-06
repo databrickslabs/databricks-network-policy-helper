@@ -363,6 +363,7 @@ def apply_egress(
         existing = AccountNetworkPolicy(account_id=account_id, network_policy_id=policy_id)
         action = "created"
 
+    _merge_databricks_destinations(getattr(existing, "egress", None), egress_block)
     existing.egress = egress_block
     # Ensure the opposite direction is defined but never clobbered: only add a permissive ingress
     # default when the policy has no ingress at all (leave an existing ingress / dry-run untouched).
@@ -377,6 +378,33 @@ def apply_egress(
         )
         effective_id = policy_id
     return action, effective_id
+
+
+def _merge_databricks_destinations(old_egress, new_egress) -> None:
+    """Carry an existing policy's cross-workspace egress destinations (allowed_databricks_destinations,
+    workspace ids added in the console or by an earlier run) into the replacement block, so updating
+    the egress never silently drops a workspace the operator allow-listed by hand. Union by id."""
+    from databricks.sdk.service.settings import (
+        EgressNetworkPolicyNetworkAccessPolicyDatabricksDestination as DbxDest,
+    )
+
+    old_na = getattr(old_egress, "network_access", None)
+    new_na = getattr(new_egress, "network_access", None)
+    if old_na is None or new_na is None:
+        return
+    old_ids = {
+        int(w)
+        for d in (getattr(old_na, "allowed_databricks_destinations", None) or [])
+        for w in (d.workspace_ids or [])
+    }
+    if not old_ids:
+        return
+    new_ids = {
+        int(w) for d in (new_na.allowed_databricks_destinations or []) for w in (d.workspace_ids or [])
+    }
+    merged = sorted(old_ids | new_ids)
+    if merged != sorted(new_ids):
+        new_na.allowed_databricks_destinations = [DbxDest(workspace_ids=merged)]
 
 
 def assign(account, workspace_id: int, policy_id: str) -> None:

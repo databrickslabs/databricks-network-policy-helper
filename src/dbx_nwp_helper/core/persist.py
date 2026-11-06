@@ -13,6 +13,9 @@ Two fixed-name Delta tables are created in the supplied schema:
     dropped by a policy cap, deselected by the operator, or excluded (threat-matched / partner / no
     resolvable identities). This is the durable record of "what the tool found" the customer asked for.
 
+`egress --uc-schema` does the same with `dbx_nwp_egress_daily` (per-day destination aggregate of
+system.access.outbound_network) and `dbx_nwp_egress_suggestions`.
+
 Everything here goes through the same SQL-warehouse connection the analysis uses; the caller needs
 CREATE TABLE / MODIFY on the schema.
 """
@@ -24,7 +27,14 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..config import UC_DAILY_TABLE, UC_SUGGESTIONS_TABLE, IngressConfig
+from ..config import (
+    UC_DAILY_TABLE,
+    UC_EGRESS_DAILY_TABLE,
+    UC_EGRESS_SUGGESTIONS_TABLE,
+    UC_SUGGESTIONS_TABLE,
+    EgressConfig,
+    IngressConfig,
+)
 
 Note = Callable[[str], None]
 
@@ -40,6 +50,8 @@ class PersistedSource:
 
     daily_table: str
     suggestions_table: str
+    egress_daily_table: str = ""
+    egress_suggestions_table: str = ""
 
 
 def _quote(part: str) -> str:
@@ -56,14 +68,21 @@ def tables(uc_schema: str) -> PersistedSource:
     return PersistedSource(
         daily_table=f"{prefix}.{_quote(UC_DAILY_TABLE)}",
         suggestions_table=f"{prefix}.{_quote(UC_SUGGESTIONS_TABLE)}",
+        egress_daily_table=f"{prefix}.{_quote(UC_EGRESS_DAILY_TABLE)}",
+        egress_suggestions_table=f"{prefix}.{_quote(UC_EGRESS_SUGGESTIONS_TABLE)}",
     )
 
 
-def ensure_tables(sql_conn, src: PersistedSource) -> None:
+def ensure_tables(sql_conn, src: PersistedSource, direction: str = "ingress") -> None:
+    """Create the direction's two tables if they don't exist yet."""
     from .. import queries, sql
 
-    sql.execute(sql_conn, queries.daily_table_ddl(src.daily_table))
-    sql.execute(sql_conn, queries.suggestions_table_ddl(src.suggestions_table))
+    if direction == "egress":
+        sql.execute(sql_conn, queries.egress_daily_table_ddl(src.egress_daily_table))
+        sql.execute(sql_conn, queries.egress_suggestions_table_ddl(src.egress_suggestions_table))
+    else:
+        sql.execute(sql_conn, queries.daily_table_ddl(src.daily_table))
+        sql.execute(sql_conn, queries.suggestions_table_ddl(src.suggestions_table))
 
 
 def _as_date(value) -> dt.date | None:
@@ -105,41 +124,77 @@ def plan_sync(
     return windows, tail_start
 
 
-def sync_daily(sql_conn, src: PersistedSource, cfg: IngressConfig, use_inet: bool, note: Note) -> dict:
-    """Bring the daily table up to date for this run's lookback window. Returns a small dict for the
-    progress line: {"rows_before", "windows": [(start, end), …], "refreshed": bool}."""
+def sync_daily(
+    sql_conn,
+    table: str,
+    *,
+    lookback_days: int,
+    refresh: bool,
+    insert_sql: Callable[[str, str], str],
+    note: Note,
+    source_label: str,
+) -> dict:
+    """Bring a persisted daily table up to date for this run's lookback window. `insert_sql(start,
+    end)` returns the INSERT … SELECT that aggregates the source rows for an inclusive ISO date window.
+    Returns a small dict for the progress line: {"rows_before", "windows": [(start, end), …],
+    "refreshed": bool}."""
     from .. import queries, sql
 
-    bounds = sql.query(sql_conn, queries.daily_table_bounds(src.daily_table))
+    bounds = sql.query(sql_conn, queries.daily_table_bounds(table))
     row = bounds.iloc[0] if not bounds.empty else {}
     lo, hi = _as_date(row.get("lo")), _as_date(row.get("hi"))
     rows_before = int(row.get("rows") or 0)
     today = _as_date(sql.query(sql_conn, queries.server_today()).iloc[0]["today"]) or dt.date.today()
 
-    if cfg.refresh_persisted and rows_before:
-        note(f"--refresh-persisted: clearing {rows_before:,} row(s) from {src.daily_table} and rebuilding.")
-        sql.execute(sql_conn, f"DELETE FROM {src.daily_table}")
+    if refresh and rows_before:
+        note(f"--refresh-persisted: clearing {rows_before:,} row(s) from {table} and rebuilding.")
+        sql.execute(sql_conn, f"DELETE FROM {table}")
         lo = hi = None
-    windows, delete_from = plan_sync(lo, hi, today, cfg.lookback_days, cfg.refresh_persisted)
-    if delete_from is not None and not cfg.refresh_persisted:
-        sql.execute(sql_conn, queries.daily_table_delete_from(src.daily_table, delete_from.isoformat()))
+    windows, delete_from = plan_sync(lo, hi, today, lookback_days, refresh)
+    if delete_from is not None and not refresh:
+        sql.execute(sql_conn, queries.daily_table_delete_from(table, delete_from.isoformat()))
     for start, end in windows:
         if start > end:
             continue
-        note(f"Aggregating system.access.audit {start} → {end} into {src.daily_table}…")
-        sql.execute(
-            sql_conn,
-            queries.daily_table_insert(
-                src.daily_table, start.isoformat(), end.isoformat(), use_inet=use_inet
-            ),
-        )
+        note(f"Aggregating {source_label} {start} → {end} into {table}…")
+        sql.execute(sql_conn, insert_sql(start.isoformat(), end.isoformat()))
     covered = f"{lo} → {hi}" if lo and hi else "(empty)"
     n_windows = len([w for w in windows if w[0] <= w[1]])
     note(
         f"Persisted daily table had {rows_before:,} row(s) covering {covered}; "
-        f"synced {n_windows} window(s) for a {cfg.lookback_days}-day lookback."
+        f"synced {n_windows} window(s) for a {lookback_days}-day lookback."
     )
-    return {"rows_before": rows_before, "windows": windows, "refreshed": bool(cfg.refresh_persisted)}
+    return {"rows_before": rows_before, "windows": windows, "refreshed": bool(refresh)}
+
+
+def sync_ingress_daily(
+    sql_conn, src: PersistedSource, cfg: IngressConfig, use_inet: bool, note: Note
+) -> dict:
+    from .. import queries
+
+    return sync_daily(
+        sql_conn,
+        src.daily_table,
+        lookback_days=cfg.lookback_days,
+        refresh=cfg.refresh_persisted,
+        insert_sql=lambda a, b: queries.daily_table_insert(src.daily_table, a, b, use_inet=use_inet),
+        note=note,
+        source_label="system.access.audit",
+    )
+
+
+def sync_egress_daily(sql_conn, src: PersistedSource, cfg: EgressConfig, note: Note) -> dict:
+    from .. import queries
+
+    return sync_daily(
+        sql_conn,
+        src.egress_daily_table,
+        lookback_days=cfg.lookback_days,
+        refresh=cfg.refresh_persisted,
+        insert_sql=lambda a, b: queries.egress_daily_table_insert(src.egress_daily_table, a, b),
+        note=note,
+        source_label="system.access.outbound_network",
+    )
 
 
 # ------------------------------------------------------------------------------ suggestions snapshot
@@ -215,6 +270,15 @@ def snapshot_rows(
     return out
 
 
+def _insert_rows(sql_conn, table: str, cols: str, value_rows: list[list[str]]) -> None:
+    """Batched literal INSERTs (a few hundred rows at most per run)."""
+    from .. import sql
+
+    for i in range(0, len(value_rows), _INSERT_BATCH):
+        values = ["(" + ", ".join(r) + ")" for r in value_rows[i : i + _INSERT_BATCH]]
+        sql.execute(sql_conn, f"INSERT INTO {table} ({cols}) VALUES\n" + ",\n".join(values))
+
+
 def write_suggestions(
     sql_conn,
     src: PersistedSource,
@@ -226,41 +290,180 @@ def write_suggestions(
     written: bool,
     run_id: str | None = None,
 ) -> str:
-    """Insert the snapshot rows (batched literal INSERTs — a few hundred rows at most). Returns the
-    run id stamped on every row."""
-    from .. import sql
-
+    """Insert the ingress snapshot rows. Returns the run id stamped on every row."""
     run_id = run_id or uuid.uuid4().hex[:12]
     cols = (
         "run_id, run_at, workspace_id, policy_name, policy_mode, policy_framing, policy_target, rule_label, "
         "rdap_owner, recommendation, distinct_ips, total_events, cidrs, status, consolidated_into, written"
     )
-    for i in range(0, len(rows), _INSERT_BATCH):
-        values = []
-        for r in rows[i : i + _INSERT_BATCH]:
-            values.append(
-                "("
-                + ", ".join(
-                    [
-                        _lit(run_id),
-                        "current_timestamp()",
-                        _lit(str(workspace_id) if workspace_id is not None else None),
-                        _lit(policy_name),
-                        _lit(cfg.policy_mode),
-                        _lit(cfg.policy_framing),
-                        _lit(r["policy_target"]),
-                        _lit(r["rule_label"]),
-                        _lit(r["rdap_owner"]),
-                        _lit(r["recommendation"]),
-                        _lit(r["distinct_ips"]),
-                        _lit(r["total_events"]),
-                        _lit(r["cidrs"]),
-                        _lit(r["status"]),
-                        _lit(r["consolidated_into"]),
-                        _lit(written),
-                    ]
+    value_rows = [
+        [
+            _lit(run_id),
+            "current_timestamp()",
+            _lit(str(workspace_id) if workspace_id is not None else None),
+            _lit(policy_name),
+            _lit(cfg.policy_mode),
+            _lit(cfg.policy_framing),
+            _lit(r["policy_target"]),
+            _lit(r["rule_label"]),
+            _lit(r["rdap_owner"]),
+            _lit(r["recommendation"]),
+            _lit(r["distinct_ips"]),
+            _lit(r["total_events"]),
+            _lit(r["cidrs"]),
+            _lit(r["status"]),
+            _lit(r["consolidated_into"]),
+            _lit(written),
+        ]
+        for r in rows
+    ]
+    _insert_rows(sql_conn, src.suggestions_table, cols, value_rows)
+    return run_id
+
+
+# ------------------------------------------------------------------------- egress snapshot
+def egress_snapshot_rows(analysis, cfg: EgressConfig, blocks: dict, *, targets_full: dict) -> list[dict]:
+    """One row per observed egress destination (and per cross-workspace / blocked entry) with its fate
+    in the final policy. `targets_full` is the pre-selection copy of analysis.targets so deselected
+    destinations are recorded too; `blocks` is build_blocks() output for the final policy."""
+    from . import egress as eg
+
+    out: list[dict] = []
+
+    def _allowed_sets(tgt):
+        blk = blocks.get(tgt)
+        na = getattr(blk, "network_access", None) if blk is not None else None
+        inet = {d.destination for d in (getattr(na, "allowed_internet_destinations", None) or [])}
+        stor = set()
+        for d in getattr(na, "allowed_storage_destinations", None) or []:
+            if d.bucket_name and d.region:
+                stor.add(("s3", (d.bucket_name, d.region)))
+            elif d.bucket_name:
+                stor.add(("gcs", d.bucket_name))
+            elif d.azure_storage_account:
+                stor.add(("azure", (d.azure_storage_account, d.azure_storage_service)))
+        xws = set()
+        for d in getattr(na, "allowed_databricks_destinations", None) or []:
+            xws.update(int(w) for w in (d.workspace_ids or []))
+        return inet, stor, xws
+
+    excluded_inet = {f: "excluded_nonglobal" for f, _ip, _r in analysis.skipped_nonglobal_fqdns}
+    excluded_stor = {name: "excluded_cross_cloud" for _label, name in analysis.skipped_cross_cloud_storage}
+
+    for tgt, full in targets_full.items():
+        inet, stor, xws = _allowed_sets(tgt)
+        now = analysis.targets.get(tgt) or eg._new_target()
+        for fqdn, events in sorted(full["internet"].items(), key=lambda kv: -kv[1]):
+            if fqdn in inet:
+                status = "allowed"
+            elif fqdn in excluded_inet:
+                status = excluded_inet[fqdn]
+            elif fqdn not in now["internet"]:
+                status = "deselected"
+            else:
+                status = "capped"
+            out.append(_erow(tgt, "internet", fqdn, analysis.fqdn_owner.get(fqdn), events, status))
+        for kind in ("s3", "gcs", "azure"):
+            for key, events in sorted(full[kind].items(), key=lambda kv: -kv[1]):
+                name, detail = _storage_name_detail(kind, key)
+                if (kind, key) in stor:
+                    status = "allowed"
+                elif eg._storage_display_name(kind, key) in excluded_stor:
+                    status = "excluded_cross_cloud"
+                elif key not in now[kind]:
+                    status = "deselected"
+                else:
+                    status = "capped"
+                out.append(_erow(tgt, kind, name, detail, events, status))
+        if analysis.xws is not None:
+            for wid, info in sorted(analysis.xws.resolved.items()):
+                status = (
+                    "allowed"
+                    if wid in xws
+                    else ("deselected" if wid not in analysis.xws_selected else "excluded")
                 )
-                + ")"
+                out.append(
+                    _erow(
+                        tgt,
+                        "databricks_workspace",
+                        str(wid),
+                        ", ".join(info["hosts"]),
+                        info["events"],
+                        status,
+                    )
+                )
+    for bucket in analysis.dropped_s3_no_region:
+        out.append(_erow("__ALL__", "s3", bucket, None, 0, "excluded_no_region"))
+    for host, reason in analysis.skipped_invalid_hosts:
+        out.append(_erow("__ALL__", "internet", host, reason, 0, "excluded_invalid_host"))
+    if analysis.xws is not None:
+        for host, reason in analysis.xws.unresolved:
+            out.append(
+                _erow(
+                    "__ALL__",
+                    "databricks_workspace",
+                    host,
+                    reason,
+                    analysis.databricks_hosts.get(host, 0),
+                    "unresolved_workspace",
+                )
             )
-        sql.execute(sql_conn, f"INSERT INTO {src.suggestions_table} ({cols}) VALUES\n" + ",\n".join(values))
+    for domain in analysis.blocked_domains:
+        out.append(_erow("__ALL__", "blocked_domain", domain, None, 0, "blocked"))
+    return out
+
+
+def _storage_name_detail(kind: str, key) -> tuple[str, str | None]:
+    if kind == "s3":
+        return key[0], key[1]
+    if kind == "azure":
+        return key[0], key[1]
+    return key, None
+
+
+def _erow(tgt, kind, destination, detail, events, status) -> dict:
+    return {
+        "policy_target": str(tgt),
+        "kind": kind,
+        "destination": str(destination),
+        "detail": detail,
+        "events": int(events or 0),
+        "status": status,
+    }
+
+
+def write_egress_suggestions(
+    sql_conn,
+    src: PersistedSource,
+    rows: list[dict],
+    *,
+    cfg: EgressConfig,
+    workspace_id,
+    policy_name: str,
+    written: bool,
+    run_id: str | None = None,
+) -> str:
+    run_id = run_id or uuid.uuid4().hex[:12]
+    cols = (
+        "run_id, run_at, workspace_id, policy_name, policy_mode, policy_target, kind, destination, detail, "
+        "events, status, written"
+    )
+    value_rows = [
+        [
+            _lit(run_id),
+            "current_timestamp()",
+            _lit(str(workspace_id) if workspace_id is not None else None),
+            _lit(policy_name),
+            _lit(cfg.policy_mode),
+            _lit(r["policy_target"]),
+            _lit(r["kind"]),
+            _lit(r["destination"]),
+            _lit(r["detail"]),
+            _lit(r["events"]),
+            _lit(r["status"]),
+            _lit(written),
+        ]
+        for r in rows
+    ]
+    _insert_rows(sql_conn, src.egress_suggestions_table, cols, value_rows)
     return run_id

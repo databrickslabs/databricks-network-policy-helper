@@ -28,6 +28,7 @@ from .config import (
     MAX_CIDRS_PER_POLICY,
     MAX_INGRESS_RULES_PER_POLICY,
     MAX_POLICY_ID_LEN,
+    MIN_POLICY_NAME_LEN,
     ApplyOptions,
     Connection,
     EgressConfig,
@@ -676,9 +677,20 @@ def _resolve_policy_name(cfg, conn: Connection, wc, yes: bool) -> None:
         return
     import questionary
 
-    entered = (
-        questionary.text(f"Policy name for the new network policy? (blank = use '{default}')").ask() or ""
-    ).strip()
+    while True:
+        entered = (
+            questionary.text(f"Policy name for the new network policy? (blank = use '{default}')").ask() or ""
+        ).strip()
+        if entered and len(entered) < MIN_POLICY_NAME_LEN:
+            # A one- or two-letter name is almost always a stray "y"/"n" meant for a yes/no prompt
+            # (one such run created a policy literally named "y"). Ask again rather than create it.
+            console.banner(
+                "warn",
+                f"'{entered}' is too short for a policy name (minimum {MIN_POLICY_NAME_LEN} characters). "
+                "If you meant to accept the default, just press Enter.",
+            )
+            continue
+        break
     cfg.policy_name = entered or default
 
 
@@ -1000,17 +1012,25 @@ def _confirm_overwrite_policy(account, policy_id: str, direction: str, yes: bool
         raise typer.Exit(code=0)
 
 
-def _optional_account_client(conn: Connection):
-    """Best-effort account client for a propose-only run, so the preview / export reflect the PAS,
-    the existing assigned policy and the inherited mode exactly as an apply would. Never prompts and
-    never exits: returns (None, None) with an info banner when no account id is known or no account
+_ACCOUNT_PREVIEW_PURPOSE = {
+    "ingress": "private access / existing-policy reuse",
+    "egress": "cross-workspace destination lookup for AWS workspace URLs",
+}
+
+
+def _optional_account_client(conn: Connection, direction: str = "ingress"):
+    """Best-effort account client for a propose-only run, so the preview / export reflect what an
+    apply would (ingress: the PAS, the existing assigned policy and the inherited mode; egress: the
+    deployment-name → workspace-id lookup for cross-workspace destinations). Never prompts and never
+    exits: returns (None, None) with an info banner when no account id is known or no account
     credentials resolve / work. Returns (account, this_workspace_id) on success."""
     from . import auth
 
+    purpose = _ACCOUNT_PREVIEW_PURPOSE.get(direction, _ACCOUNT_PREVIEW_PURPOSE["ingress"])
     if not conn.account_id:
         console.banner(
             "info",
-            "No account id resolved — private access / existing-policy reuse won't be previewed. Pass "
+            f"No account id resolved — {purpose} won't be previewed. Pass "
             "--account-id and --account-profile <account-admin login> for a preview that matches the "
             "apply.",
         )
@@ -1023,15 +1043,15 @@ def _optional_account_client(conn: Connection):
     except Exception as e:  # noqa: BLE001 - propose-only must never fail on account auth
         console.banner(
             "info",
-            f"Account API not reachable with the resolved credentials ({type(e).__name__}) — private "
-            "access / existing-policy reuse won't be previewed. Pass --account-profile <account-admin "
-            "login> for a preview that matches the apply.",
+            f"Account API not reachable with the resolved credentials ({type(e).__name__}) — {purpose} "
+            "won't be previewed. Pass --account-profile <account-admin login> for a preview that "
+            "matches the apply.",
         )
         return None, None
     console.banner(
         "info",
-        "Propose-only run with account credentials — previewing private access, existing-policy "
-        "reuse and inherited mode exactly as an apply would (nothing is written).",
+        f"Propose-only run with account credentials — previewing {purpose} exactly as an apply would "
+        "(nothing is written).",
     )
     return account, this_ws
 
@@ -1878,6 +1898,24 @@ def egress(
         "directory writes <policy-id>.json inside it. Single-policy scopes only. Works in "
         "propose-only mode too.",
     ),
+    cross_workspace_destinations: bool = typer.Option(
+        True,
+        "--cross-workspace-destinations/--no-cross-workspace-destinations",
+        help="Turn observed egress to OTHER Databricks workspaces (workspace / Apps / AI-gateway URLs "
+        "whose workspace id can be inferred) into cross-workspace egress destinations "
+        "(allowed_databricks_destinations). On by default (interactive runs get a pre-checked "
+        "selector); --no-cross-workspace-destinations only flags them.",
+    ),
+    uc_schema: str = typer.Option(
+        "",
+        help="Persist the analysis to this Unity Catalog schema (catalog.schema): a per-day destination "
+        "aggregate table (dbx_nwp_egress_daily) kept up to date incrementally — re-runs re-aggregate it "
+        "instead of re-scanning system.access.outbound_network — plus a snapshot of each run's proposed "
+        "destinations (dbx_nwp_egress_suggestions). Needs CREATE TABLE / MODIFY on the schema.",
+    ),
+    refresh_persisted: bool = typer.Option(
+        False, help="With --uc-schema: rebuild the persisted daily table from scratch."
+    ),
     account_id: str | None = typer.Option(None, help="Databricks account_id (apply)."),
     account_host: str | None = typer.Option(
         None, help="Account host. When unset, derived from the workspace's environment."
@@ -1921,6 +1959,9 @@ def egress(
         abuse_ch_auth_key=abuse_ch_auth_key,
         domain_allowlist=domain_allowlist,
         select_rules=select_rules,
+        cross_workspace_destinations=cross_workspace_destinations,
+        uc_schema=uc_schema.strip(),
+        refresh_persisted=refresh_persisted,
         apply=ApplyOptions(
             create_policy=create_policy,
             policy_action=policy_action.value,
@@ -2328,6 +2369,8 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         # (consolidate low-traffic rules; leave partner rules to the console's managed source). The
         # partner offer is made once per selection, whenever a cap was hit at any point — even if
         # consolidation then absorbed it — since the managed source is the cleaner home either way.
+        # The offers come BEFORE the preview is rendered, so a policy about to be rebuilt (e.g. the
+        # truncated one consolidation replaces) is never printed in full only to be discarded.
         limits_hit = False
         partner_offered = False
         while True:
@@ -2335,11 +2378,6 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
                 analysis, cfg, identity_resolution, note=lambda m: console.banner("warn", m)
             )
             limits_hit = limits_hit or bool(analysis.truncations) or bool(analysis.consolidation)
-            previews = rules.preview_blocks(policies, cfg, note=lambda m: console.banner("info", m))
-            render.ingress_preview(previews, cfg, analysis)
-            if previews:
-                console.responsibility_warning("source IP addresses / CIDRs")
-                _note_cross_workspace_compat(cfg)
             if _offer_consolidation(analysis, cfg, yes):
                 console.rule("Rebuilding with consolidated rules")
                 continue
@@ -2349,6 +2387,11 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
                     console.rule("Rebuilding without partner-platform rules")
                     continue
             break
+        previews = rules.preview_blocks(policies, cfg, note=lambda m: console.banner("info", m))
+        render.ingress_preview(previews, cfg, analysis)
+        if previews:
+            console.responsibility_warning("source IP addresses / CIDRs")
+            _note_cross_workspace_compat(cfg)
         if _confirm_truncation(
             analysis.truncations, yes, allow_reselect=True, summary=analysis.truncation_summary
         ):
@@ -2486,8 +2529,13 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         validate_apply(cfg.apply, cfg.policy_scope, other_direction="ingress")
         validate_policy_name(cfg.policy_name, cfg.policy_scope, cfg.apply.policy_action)
         validate_export(cfg.export, cfg.policy_scope)
+        validate_uc_schema(cfg.uc_schema)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from None
+    if cfg.refresh_persisted and not cfg.uc_schema:
+        raise typer.BadParameter(
+            "--refresh-persisted only applies together with --uc-schema <catalog.schema>."
+        )
 
     console.title_panel(
         "Egress Policy Helper (serverless egress / SEG)",
@@ -2517,10 +2565,17 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     this_ws = auth.this_workspace_id(conn) if cfg.policy_scope == "current_workspace" else None
 
     # The workspace we'd probe/bind is always "this" workspace, independent of the analysis scope.
+    # It's also the one workspace that is never a cross-workspace egress destination.
+    own_ws = this_ws if this_ws is not None else auth.this_workspace_id(conn)
     apply_ws = None
     if cfg.apply.create_policy:
-        apply_ws = this_ws if this_ws is not None else auth.this_workspace_id(conn)
+        apply_ws = own_ws
         account = _account_client_or_exit(conn, workspace_id=apply_ws)
+    elif cfg.cross_workspace_destinations:
+        # Propose-only: a best-effort account client lets AWS workspace URLs (deployment names)
+        # resolve to workspace ids, so the preview shows the same cross-workspace destinations an
+        # apply would. Silent no-op without account credentials.
+        account, _ = _optional_account_client(conn, direction="egress")
 
     # The workspace's cloud gates which storage-destination type the egress policy can carry (the API
     # rejects cross-cloud storage, e.g. Azure storage on an AWS workspace) — derive it from the host.
@@ -2536,17 +2591,24 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
                 this_workspace_id=this_ws,
                 workspace_cloud=ws_cloud,
                 status=console.status,
+                account=account,
+                own_workspace_id=own_ws,
             )
         )
 
-    render.egress_analysis(analysis)
+    render.egress_analysis(analysis, cfg)
     _checkpoint(yes)
+    # Snapshot the full observed set before any selection, so the suggestions record covers
+    # deselected destinations too.
+    targets_full = {t: {k: dict(v) for k, v in d.items()} for t, d in analysis.targets.items()}
     # Optionally let the user cull the observed destinations before the policy is built/previewed.
     _select_egress_rules(analysis, cfg, yes)
+    _select_xws_destinations(analysis, cfg, yes)
     previews = eg.preview_blocks(analysis, cfg, note=lambda m: console.banner("warn", m))
     render.egress_preview(previews, cfg)
     if previews:
-        console.responsibility_warning("FQDNs and storage destinations")
+        console.responsibility_warning("FQDNs, storage and cross-workspace destinations")
+        _note_xws_destinations(analysis, cfg)
     _confirm_truncation(analysis.truncations, yes)
 
     if cfg.export:
@@ -2558,6 +2620,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
             console.banner("warn", "Nothing to export — no egress destinations were classified.")
 
     if not cfg.apply.create_policy:
+        _persist_egress_suggestions(conn, http_path, analysis, cfg, targets_full, own_ws, False)
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
         return
     if not previews:
@@ -2589,6 +2652,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
 
     _recap_truncation(analysis.truncations, None, "before write")
     if not _confirm_write(cfg.policy_mode, yes):
+        _persist_egress_suggestions(conn, http_path, analysis, cfg, targets_full, own_ws, False)
         console.banner("info", "Aborted — nothing written.")
         return
 
@@ -2603,6 +2667,124 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
             note=lambda m: console.banner("info", m),
         )
     render.apply_results(results, conn.account_host, conn.account_id)
+    _persist_egress_suggestions(conn, http_path, analysis, cfg, targets_full, own_ws, True)
+
+
+def _select_xws_destinations(analysis, cfg: EgressConfig, yes: bool) -> None:
+    """Pre-checked checkbox of the inferred cross-workspace destination workspaces (one entry per
+    workspace id, showing the hosts it was inferred from). Deselected ids are dropped from
+    analysis.xws_selected. No-op without resolved workspaces, under --yes / non-interactive, with
+    --no-select-rules, or with --no-cross-workspace-destinations."""
+    if not cfg.cross_workspace_destinations or not cfg.select_rules or not _interactive(yes):
+        return
+    res = analysis.xws
+    if res is None or not res.resolved:
+        return
+    import questionary
+
+    choices = []
+    for wid, info in sorted(res.resolved.items(), key=lambda kv: -kv[1]["events"]):
+        hosts = ", ".join(info["hosts"][:2])
+        if len(info["hosts"]) > 2:
+            hosts += f" +{len(info['hosts']) - 2} more"
+        verified = info.get("verified")
+        tag = {
+            True: "verified",
+            False: "NOT in this metastore/account — other account? verify first",
+            None: "unverified",
+        }[verified]
+        choices.append(
+            questionary.Choice(
+                title=f"workspace {wid}  ({info['events']} events; {tag}; from {hosts})",
+                value=wid,
+                checked=verified is not False,  # unverified ids start unticked
+            )
+        )
+    kept = _checkbox_keep(
+        "Select the cross-workspace destination workspaces to allow (space=toggle, enter=confirm):", choices
+    )
+    if kept is None:
+        console.banner("info", "Selection cancelled — aborting, nothing written.")
+        raise typer.Exit(code=0)
+    analysis.xws_selected = sorted(int(w) for w in kept)
+    dropped = len(res.resolved) - len(kept)
+    if dropped:
+        console.banner("info", f"Excluded {dropped} cross-workspace destination(s) from your selection.")
+
+
+def _note_xws_destinations(analysis, cfg: EgressConfig) -> None:
+    """After the preview: remind the operator that cross-workspace egress is only half the picture —
+    each destination workspace's ingress policy must also allow this workspace — and that the
+    unresolved Databricks hosts stay flagged."""
+    res = analysis.xws
+    if res is None:
+        return
+    selected = [w for w in analysis.xws_selected] if cfg.cross_workspace_destinations else []
+    if selected:
+        console.banner(
+            "info",
+            f"Cross-workspace egress: {len(selected)} destination workspace(s) added to "
+            "allowed_databricks_destinations. Traffic flows only when BOTH sides agree — each destination "
+            "workspace's context-based ingress policy must also allow this workspace (cross-workspace "
+            "access must be out of compatibility mode there).",
+        )
+    elif res.resolved and not cfg.cross_workspace_destinations:
+        console.banner(
+            "info",
+            f"{len(res.resolved)} destination workspace(s) were inferred from the Databricks hosts but "
+            "--no-cross-workspace-destinations is set, so they are flagged only.",
+        )
+    unverified = [w for w, i in res.resolved.items() if i.get("verified") is False and w not in selected]
+    if unverified and cfg.cross_workspace_destinations:
+        console.banner(
+            "warn",
+            f"{len(unverified)} inferred destination id(s) are not known to this metastore or account and "
+            f"were NOT added: {', '.join(str(w) for w in sorted(unverified))}. They may be workspaces in "
+            "another account (cross-account egress is allowed) — confirm the id with its owner and tick it "
+            "in the selector, or add it in the console.",
+        )
+
+
+def _persist_egress_suggestions(
+    conn: Connection,
+    http_path: str,
+    analysis,
+    cfg: EgressConfig,
+    targets_full: dict,
+    workspace_id,
+    written: bool,
+) -> None:
+    """With --uc-schema, record this run's observed destinations and what became of each (allowed /
+    blocked / deselected / capped / excluded) in dbx_nwp_egress_suggestions. Best-effort."""
+    if not cfg.uc_schema:
+        return
+    from . import sql
+    from .core import egress as eg
+    from .core import persist
+
+    try:
+        src = persist.tables(cfg.uc_schema)
+        blocks = eg.build_blocks(analysis, cfg)
+        rows = persist.egress_snapshot_rows(analysis, cfg, blocks, targets_full=targets_full)
+        if not rows:
+            return
+        with console.status(f"Recording {len(rows)} destination(s) in {src.egress_suggestions_table}…"):
+            with sql.connection(conn, http_path) as sconn:
+                run_id = persist.write_egress_suggestions(
+                    sconn,
+                    src,
+                    rows,
+                    cfg=cfg,
+                    workspace_id=workspace_id,
+                    policy_name=cfg.policy_name,
+                    written=written,
+                )
+        console.banner(
+            "success",
+            f"Recorded {len(rows)} destination(s) for run {run_id} in {src.egress_suggestions_table}.",
+        )
+    except Exception as e:  # noqa: BLE001 - persistence is a record, never a gate
+        console.banner("warn", f"Could not record the run's destinations in {cfg.uc_schema}: {e}")
 
 
 if __name__ == "__main__":

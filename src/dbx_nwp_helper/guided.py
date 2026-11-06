@@ -115,18 +115,8 @@ def resolve_threat_ip_feeds(interactive: bool, engaged: bool) -> list[str]:
     ).ask() or list(THREAT_FEEDS)
 
 
-def _ingress_wizard(conn: Connection) -> IngressConfig:
-    console.rule("Ingress questions")
-    lookback = _int("How many days of audit history to analyse?", 30)
-    min_events = _int("Minimum successful events for an IP to be a candidate?", 1)
-    framing = _select("CIDR framing?", POLICY_FRAMINGS, default="minimal")
-    scoping = _select("Scoping mode?", SCOPING_MODES, default="ip_only")
-    scope = _select("Policy scope?", POLICY_SCOPES, default="current_workspace")
-    enable_rdap = framing == "maximum" or _confirm("Do RDAP owner lookups (external calls)?", True)
-    threat_deny = _select(
-        "Add threat-intel deny rules for known-bad source IPs?", THREAT_DENY_RULES, default="off"
-    )
-    feeds = resolve_threat_ip_feeds(interactive=True, engaged=threat_deny != "off")
+def _ask_uc_schema() -> str:
+    """Prompt for an optional `catalog.schema` to persist the analysis in (blank = don't)."""
     uc_schema = _text(
         "Persist the analysis to a Unity Catalog schema for faster re-runs? "
         "(catalog.schema — blank = don't persist)",
@@ -139,6 +129,22 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
         except ValueError as e:
             console.banner("warn", str(e))
             uc_schema = _text("Unity Catalog schema (catalog.schema — blank = don't persist)", "").strip()
+    return uc_schema
+
+
+def _ingress_wizard(conn: Connection) -> IngressConfig:
+    console.rule("Ingress questions")
+    lookback = _int("How many days of audit history to analyse?", 30)
+    min_events = _int("Minimum successful events for an IP to be a candidate?", 1)
+    framing = _select("CIDR framing?", POLICY_FRAMINGS, default="minimal")
+    scoping = _select("Scoping mode?", SCOPING_MODES, default="ip_only")
+    scope = _select("Policy scope?", POLICY_SCOPES, default="current_workspace")
+    enable_rdap = framing == "maximum" or _confirm("Do RDAP owner lookups (external calls)?", True)
+    threat_deny = _select(
+        "Add threat-intel deny rules for known-bad source IPs?", THREAT_DENY_RULES, default="off"
+    )
+    feeds = resolve_threat_ip_feeds(interactive=True, engaged=threat_deny != "off")
+    uc_schema = _ask_uc_schema()
 
     apply = _apply_wizard(conn, scope, other="egress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
@@ -222,6 +228,12 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
     feeds, auth_key, allowlist = list(DEFAULT_EGRESS_THREAT_FEEDS), None, True
     if block != "off":
         feeds, auth_key, allowlist = resolve_threat_domain_feeds(interactive=True)
+    xws = _confirm(
+        "Allow observed egress to OTHER Databricks workspaces as cross-workspace destinations "
+        "(by inferred workspace id)?",
+        True,
+    )
+    uc_schema = _ask_uc_schema()
 
     apply = _apply_wizard(conn, scope, other="ingress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
@@ -239,6 +251,8 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
         abuse_ch_auth_key=auth_key,
         domain_allowlist=allowlist,
         domain_allowlist_feeds=list(DOMAIN_ALLOWLIST_FEEDS),
+        cross_workspace_destinations=xws,
+        uc_schema=uc_schema,
         apply=apply,
     )
 
