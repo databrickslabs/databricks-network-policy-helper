@@ -1389,32 +1389,32 @@ def _offer_consolidation(analysis, cfg: IngressConfig, yes: bool) -> bool:
     return cfg.consolidate_rules
 
 
-def _offer_partner_exclusion(analysis, cfg: IngressConfig, yes: bool) -> bool:
-    """When the CIDR cap still bites and partner-platform (Power BI / dbt / Tableau) ranges are in the
-    allow-list, offer to leave those CIDRs out and have the operator add the partners through the
-    console's managed 'Partner platforms' source instead (which Databricks keeps current and which
-    doesn't count against the CIDR cap). Interactive only — the scripted default keeps the CIDRs.
-    Returns True when the caller should rebuild with cfg.exclude_partner_cidrs=True."""
+def _offer_partner_exclusion(analysis, cfg: IngressConfig, yes: bool, *, limits_hit: bool) -> bool:
+    """When a policy limit was hit (the rule cap — whether or not consolidation then absorbed it — or
+    the CIDR cap) and partner-platform (Power BI / dbt / Tableau) ranges are in the allow-list, offer
+    to leave those rules out and have the operator add the partners through the console's managed
+    'Partner platforms' source instead (which Databricks keeps current and which counts against
+    neither cap). Interactive only — the scripted default keeps the CIDRs. Returns True when the
+    caller should rebuild with cfg.exclude_partner_cidrs=True."""
     from .core import ingress_rules as rules
 
-    if cfg.exclude_partner_cidrs or not analysis.truncations or not _interactive(yes):
-        return False
-    if not any("CIDR" in m and "limit" in m for m in analysis.truncations):
+    if cfg.exclude_partner_cidrs or not limits_hit or not _interactive(yes):
         return False
     n_rules, n_cidrs = rules.partner_cidr_count(analysis)
     if not n_cidrs:
         return False
     console.banner(
         "info",
-        f"{n_cidrs:,} of the allow-listed CIDRs ({n_rules} rule(s)) are partner-platform ranges. Databricks "
-        "offers a managed 'Partner platforms' ingress source (account console → policy → Ingress; Beta, "
-        "AWS + GCP) that tracks those IPs for you and doesn't count against the CIDR cap.",
+        f"This policy is up against its limits, and {n_rules} allow rule(s) / {n_cidrs:,} CIDR(s) are "
+        "partner-platform ranges. Databricks offers a managed 'Partner platforms' ingress source "
+        "(account console → policy → Ingress; Beta, AWS + GCP) that tracks those IPs for you and counts "
+        "against neither the rule nor the CIDR cap.",
     )
     cfg.exclude_partner_cidrs = bool(
         typer.confirm(
             typer.style(
-                "Leave the partner CIDRs out of this policy (you'll add the partners via the console's "
-                "'Partner platforms' source) to free up room?",
+                "Leave the partner-platform rule(s) out of this policy (you'll add the partners via the "
+                "console's 'Partner platforms' source) to free up room?",
                 fg="yellow",
                 bold=True,
             ),
@@ -2325,11 +2325,16 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
                 )
 
         # Build → preview, re-building when the operator takes one of the limit-fitting offers
-        # (consolidate low-traffic rules; leave partner CIDRs to the console's managed source).
+        # (consolidate low-traffic rules; leave partner rules to the console's managed source). The
+        # partner offer is made once per selection, whenever a cap was hit at any point — even if
+        # consolidation then absorbed it — since the managed source is the cleaner home either way.
+        limits_hit = False
+        partner_offered = False
         while True:
             policies = rules.build_rules(
                 analysis, cfg, identity_resolution, note=lambda m: console.banner("warn", m)
             )
+            limits_hit = limits_hit or bool(analysis.truncations) or bool(analysis.consolidation)
             previews = rules.preview_blocks(policies, cfg, note=lambda m: console.banner("info", m))
             render.ingress_preview(previews, cfg, analysis)
             if previews:
@@ -2338,9 +2343,11 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
             if _offer_consolidation(analysis, cfg, yes):
                 console.rule("Rebuilding with consolidated rules")
                 continue
-            if _offer_partner_exclusion(analysis, cfg, yes):
-                console.rule("Rebuilding without partner-platform CIDRs")
-                continue
+            if not partner_offered:
+                partner_offered = True
+                if _offer_partner_exclusion(analysis, cfg, yes, limits_hit=limits_hit):
+                    console.rule("Rebuilding without partner-platform rules")
+                    continue
             break
         if _confirm_truncation(
             analysis.truncations, yes, allow_reselect=True, summary=analysis.truncation_summary

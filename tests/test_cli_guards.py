@@ -2007,32 +2007,38 @@ def test_offer_consolidation_noop_without_truncation():
     assert cli._offer_consolidation(analysis, cfg, yes=True) is False and cfg.consolidate_rules is None
 
 
-def test_offer_partner_exclusion_only_when_cidr_cap_bites(monkeypatch):
+def test_offer_partner_exclusion_only_when_a_limit_was_hit(monkeypatch):
     analysis, cfg = _capped_analysis(partner=True)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt")))
-    # only the RULE cap bit here → no partner offer
-    assert cli._offer_partner_exclusion(analysis, cfg, yes=False) is False
+    assert cli._offer_partner_exclusion(analysis, cfg, yes=False, limits_hit=False) is False
 
 
-def test_offer_partner_exclusion_accept(monkeypatch, capsys):
+def test_offer_partner_exclusion_offered_on_rule_cap_too(monkeypatch, capsys):
+    # The rule cap (not just the CIDR cap) triggers the hand-off — the partner rule stays named
+    # (pinned) through consolidation, and the operator may prefer the console's managed source.
     analysis, cfg = _capped_analysis(partner=True)
-    analysis.truncations = ["[single policy] allow CIDRs (2,500) alone exceed the 2,000-CIDR policy limit"]
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
-    assert cli._offer_partner_exclusion(analysis, cfg, yes=False) is True
+    assert cli._offer_partner_exclusion(analysis, cfg, yes=False, limits_hit=True) is True
     assert cfg.exclude_partner_cidrs is True
     out = _plain(capsys.readouterr().out)
-    assert "1 of the allow-listed CIDRs (1 rule(s)) are partner-platform ranges" in out
+    assert "1 allow rule(s) / 1 CIDR(s) are" in out and "partner-platform ranges" in out
     assert "REMEMBER" in out and "Partner platforms" in out
 
 
 def test_offer_partner_exclusion_skipped_under_yes(monkeypatch):
     analysis, cfg = _capped_analysis(partner=True)
-    analysis.truncations = ["allow CIDRs exceed the 2,000-CIDR policy limit"]
     monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt")))
-    assert cli._offer_partner_exclusion(analysis, cfg, yes=True) is False
+    assert cli._offer_partner_exclusion(analysis, cfg, yes=True, limits_hit=True) is False
     assert cfg.exclude_partner_cidrs is False  # scripted default keeps the CIDRs
+
+
+def test_offer_partner_exclusion_noop_without_partners(monkeypatch):
+    analysis, cfg = _capped_analysis(partner=False)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt")))
+    assert cli._offer_partner_exclusion(analysis, cfg, yes=False, limits_hit=True) is False
 
 
 def test_confirm_truncation_prints_panel_even_under_yes(capsys):

@@ -177,10 +177,11 @@ valid: **50 ingress rules, 2000 CIDR blocks, 100 identities per policy; 1000 pol
 **Large environments — consolidation, not truncation.** Every RDAP owner is its own rule, so hundreds
 of owners hit the 50-rule cap first. When that happens the run **offers to consolidate**: the
 highest-traffic owners keep named rules and the rest fold into **`Consolidated-Observed-IPs`** rule(s)
-(one per destination/identity shape; Databricks-owned + migrated-ACL rules are never folded; adjacent
-CIDRs merged losslessly). IPs are only lost if the **2,000-CIDR** cap is also exceeded — then an
-interactive run offers to drop **partner-platform** CIDRs in favour of the console's managed *Partner
-platforms* source (remind the user to add the partner there afterwards). Interactive = prompt (default
+(one per destination/identity shape; Databricks-owned, partner-platform + migrated-ACL rules are never
+folded; adjacent CIDRs merged losslessly). IPs are only lost if the **2,000-CIDR** cap is also
+exceeded. Whenever a cap is hit, an interactive run also offers to drop the **partner-platform** rules
+in favour of the console's managed *Partner platforms* source (remind the user to add the partner
+there afterwards). Interactive = prompt (default
 yes); `--yes` = consolidate; `--consolidate-rules` / `--no-consolidate-rules` decide up front. Any
 truncation that still happens is shown in a **red panel** at the gate and again before the write.
 

@@ -225,6 +225,23 @@ def test_build_rules_databricks_owned_is_pinned_and_never_folded():
     assert "databricks-aws" not in folded["consolidated_from"]
 
 
+def test_build_rules_partner_rule_is_pinned_through_consolidation():
+    # A low-traffic partner-platform group keeps its own named rule when the tail is folded (the
+    # live run that motivated this had Power BI vanish into Consolidated-Observed-IPs).
+    rows = _big_rows()
+    rows.append(
+        _suggestion("Power BI", "40.82.253.131/32", events=1, partners=["Power BI"], cloud_provider=["azure"])
+    )
+    a = _analysis(rows)
+    pols = rules.build_rules(a, IngressConfig(consolidate_rules=True))
+    allow = pols[ALL_WORKSPACES]["allow"]
+    assert len(allow) == 50
+    assert any(s["label"] == "Power-BI" and s["partner"] for s in allow)
+    folded = next(s for s in allow if s["label"] == CONSOLIDATED_RULE_LABEL)
+    assert "Power-BI" not in folded["consolidated_from"]
+    assert "40.82.253.131/32" not in folded["cidrs"]
+
+
 def test_build_rules_exclude_partner_cidrs():
     rows = _big_rows(5)
     rows.append(

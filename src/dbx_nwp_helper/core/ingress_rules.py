@@ -157,7 +157,10 @@ def build_rules(
                 # Ranking + bookkeeping for consolidation / partner exclusion (core.limits).
                 "events": int(row.get("total_events") or 0),
                 "distinct_ips": int(row.get("distinct_ips") or len(ipv4_cidrs)),
-                "pinned": bool(row["databricks_owned"]),
+                # Databricks-owned and partner-platform groups keep their own labelled rule — they're
+                # recommended ALLOWs the operator should be able to see (and hand off to the console's
+                # managed partner source), not fold into the consolidated bucket.
+                "pinned": bool(row["databricks_owned"]) or bool(row.get("partners")),
                 "partner": bool(row.get("partners")),
             }
             if cfg.scope_identity and not row["databricks_owned"]:

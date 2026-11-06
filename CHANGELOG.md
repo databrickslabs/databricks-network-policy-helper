@@ -22,16 +22,15 @@ Scale release for large environments (thousands of source IPs / hundreds of owne
 - **Rule consolidation instead of dropping (ingress).** When the proposed allow rules exceed the
   per-policy **50-rule** cap, the run now **offers to consolidate**: the highest-traffic owner groups
   keep their own labelled rules and the remainder are folded into **`Consolidated-Observed-IPs`**
-  rule(s) — one per destination/identity shape, adjacent CIDRs merged losslessly, Databricks-owned
-  and migrated-IP-ACL rules never folded, room reserved for deny rules. Every observed IP stays in the
+  rule(s) — one per destination/identity shape, adjacent CIDRs merged losslessly, Databricks-owned,
+  partner-platform and migrated-IP-ACL rules never folded, room reserved for deny rules. Every observed IP stays in the
   policy unless the 2,000-CIDR cap itself is exceeded. Interactive runs are **prompted** (default
   yes); `--yes` consolidates automatically; `--consolidate-rules` / `--no-consolidate-rules` decide up
   front. (Previously a 276-owner environment silently kept 50 rules and dropped 226.)
-- **Partner-platform CIDR hand-off.** If the CIDR cap still bites after consolidation and the
-  allow-list contains partner-platform ranges (Power BI / dbt / Tableau), an interactive run offers to
-  leave those CIDRs out and reminds you to add the partners via the console's managed *Partner
-  platforms* source (console-only — the SDK and Terraform provider don't expose it). Default keeps
-  the CIDRs.
+- **Partner-platform hand-off.** Whenever a policy cap is hit and the allow-list contains
+  partner-platform rules (Power BI / dbt / Tableau), an interactive run offers to leave those rules out
+  and reminds you to add the partners via the console's managed *Partner platforms* source
+  (console-only — the SDK and Terraform provider don't expose it). Default keeps the rules.
 - **`--uc-schema <catalog.schema>` — persist the ingress analysis to Unity Catalog.** Maintains
   `dbx_nwp_ingress_daily`, a per-(day, workspace, source IP, outcome) aggregate of
   `system.access.audit` built server-side and **updated incrementally** (only missing days plus the

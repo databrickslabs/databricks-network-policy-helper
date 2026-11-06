@@ -86,7 +86,7 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 
 | Option | What it does |
 |---|---|
-| `--consolidate-rules` / `--no-consolidate-rules` | When the proposed allow rules exceed the **50-rule** cap, fold the lowest-traffic owner groups into **`Consolidated-Observed-IPs`** rule(s) so their IPs stay in the policy (only the 2,000-CIDR cap can still drop IPs). Default: **prompt** when a cap is hit; `--yes` consolidates. If the CIDR cap still bites and partner-platform ranges are present, an interactive run also offers to leave those CIDRs out in favour of the console's managed **Partner platforms** source. |
+| `--consolidate-rules` / `--no-consolidate-rules` | When the proposed allow rules exceed the **50-rule** cap, fold the lowest-traffic owner groups into **`Consolidated-Observed-IPs`** rule(s) so their IPs stay in the policy (only the 2,000-CIDR cap can still drop IPs). Default: **prompt** when a cap is hit; `--yes` consolidates. Partner-platform rules (Power BI / dbt / Tableau) are never folded; when a cap is hit, an interactive run also offers to leave them out in favour of the console's managed **Partner platforms** source. |
 | `--uc-schema <catalog.schema>` | **Persist the analysis to Unity Catalog.** Maintains `dbx_nwp_ingress_daily` — a per-day source-IP aggregate of `system.access.audit`, built server-side and **updated incrementally** (only the days the table lacks, plus the two most recent, are re-read) — and re-aggregates it instead of re-scanning the audit log on every run. Each run also records its proposed rules and their fate (kept / consolidated / dropped / deselected / excluded) in `dbx_nwp_ingress_suggestions`. `--refresh-persisted` rebuilds the daily table. |
 
 RDAP owner lookups are also cached on disk for 30 days (`feeds list` shows `rdap_owners`), so re-runs over the same IPs skip the slow RIR calls.
@@ -398,11 +398,11 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   (hundreds of owners, thousands of IPs) hits the rule cap long before the CIDR cap. Rather than drop
   rules 51+, the `ingress` command **offers to consolidate**: the highest-traffic owners keep their
   named rules and the rest are folded into **`Consolidated-Observed-IPs`** rule(s) (one per
-  destination/identity shape; Databricks-owned and migrated-IP-ACL rules are never folded; adjacent
-  CIDRs are merged losslessly). IPs are lost only when the CIDR cap itself is exceeded — and then an
-  interactive run offers to leave **partner-platform** CIDRs (Power BI / dbt / Tableau) out so you can
-  add those partners via the console's managed *Partner platforms* source instead (which Databricks
-  keeps current and which doesn't count against the cap). Any truncation that does happen is shown in
+  destination/identity shape; Databricks-owned, partner-platform and migrated-IP-ACL rules are never
+  folded; adjacent CIDRs are merged losslessly). IPs are lost only when the CIDR cap itself is exceeded.
+  Whenever a cap is hit, an interactive run also offers to leave the **partner-platform** rules (Power
+  BI / dbt / Tableau) out so you can add those partners via the console's managed *Partner platforms*
+  source instead (which Databricks keeps current and which counts against neither cap). Any truncation that does happen is shown in
   a **red panel** at the decision gate and again right before the write. `--no-consolidate-rules`
   restores the plain drop-the-tail behaviour.
 - **`--uc-schema catalog.schema` (ingress persistence).** For big audit logs the SQL step dominates.
