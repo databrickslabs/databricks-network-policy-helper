@@ -104,6 +104,17 @@ def egress_decisions(cfg: EgressConfig) -> None:
                 cfg.policy_name,
                 "Policy id (single scope) / prefix (per_workspace); blank = profile name.",
             ),
+            (
+                "cross_workspace_destinations",
+                cfg.cross_workspace_destinations,
+                "Egress to other Databricks workspaces → allowed_databricks_destinations.",
+            ),
+            ("uc_schema", cfg.uc_schema, "Persist the analysis to catalog.schema (incremental re-runs)."),
+            *(
+                [("refresh_persisted", cfg.refresh_persisted, "Rebuild the persisted daily table.")]
+                if cfg.refresh_persisted
+                else []
+            ),
             ("create_policy", cfg.apply.create_policy, "Master switch: nothing is written unless true."),
             ("policy_action", cfg.apply.policy_action, "create_new or add_to_existing."),
             ("existing_policy_id", cfg.apply.existing_policy_id, "Target id for add_to_existing."),
@@ -282,7 +293,7 @@ def ingress_preview(previews: dict, cfg: IngressConfig, analysis: IngressAnalysi
 
 
 # -------------------------------------------------------------------------------- egress tables
-def egress_analysis(analysis: EgressAnalysis) -> None:
+def egress_analysis(analysis: EgressAnalysis, cfg: EgressConfig | None = None) -> None:
     console.rule("Observed egress destinations")
     if analysis.observed.empty:
         console.banner(
@@ -371,14 +382,65 @@ def egress_analysis(analysis: EgressAnalysis) -> None:
             f"storage rule): {buckets}. Add them manually with their region if "
             f"needed.",
         )
+    res = analysis.xws
+    if res is not None and res.resolved:
+        on = cfg.cross_workspace_destinations if cfg is not None else True
+        console.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "workspace_id": wid,
+                        "events": info["events"],
+                        "inferred_from": ", ".join(info["hosts"]),
+                        "method": ", ".join(sorted(info["methods"])),
+                        "recommendation": (
+                            "ALLOW — cross-workspace destination" if on else "FLAGGED — cross-workspace off"
+                        ),
+                    }
+                    for wid, info in sorted(res.resolved.items(), key=lambda kv: -kv[1]["events"])
+                ]
+            ),
+            f"Cross-workspace egress destinations inferred from Databricks URLs ({len(res.resolved)})",
+        )
+        console.banner(
+            "info",
+            "Egress to another Databricks workspace can't be an internet destination (the API rejects "
+            "Databricks hosts) but CAN be allowed as a cross-workspace destination by workspace id. The "
+            "ids above were inferred from the observed hostnames"
+            + (" (AWS deployment names via the account workspace list)." if res.account_lookup else ".")
+            + (
+                " They'll be added to allowed_databricks_destinations."
+                if on
+                else " --no-cross-workspace-destinations is set, so they're flagged only."
+            ),
+        )
+    if res is not None and res.own:
+        console.banner(
+            "info",
+            f"{len(res.own)} Databricks host(s) belong to THIS workspace — same-workspace traffic is always "
+            f"allowed, nothing to add: {', '.join(res.own)}.",
+        )
     if analysis.skipped_databricks_urls:
-        hosts = ", ".join(analysis.skipped_databricks_urls)
+        from .core import xws as xws_core
+
+        reasons = dict(res.unresolved) if res is not None else {}
+        items = ", ".join(
+            f"{h} ({xws_core.REASON_TEXT.get(reasons.get(h, ''), reasons.get(h, 'unresolved'))})"
+            for h in analysis.skipped_databricks_urls
+        )
         console.banner(
             "warn",
-            f"Excluded {len(analysis.skipped_databricks_urls)} Databricks workspace / Apps / "
-            f"model-serving URL(s) — these are platform-internal and can't be set as egress internet "
-            f"destinations (the API rejects them), so they're flagged here but NOT added to the "
-            f"policy: {hosts}.",
+            f"Excluded {len(analysis.skipped_databricks_urls)} Databricks host(s) that can't be set as "
+            f"egress internet destinations (the API rejects them) and whose workspace id could not be "
+            f"inferred for a cross-workspace rule — flagged here but NOT added to the policy: {items}.",
+        )
+    if analysis.skipped_invalid_hosts:
+        items = ", ".join(f"{h} ({reason})" for h, reason in analysis.skipped_invalid_hosts)
+        console.banner(
+            "warn",
+            f"Excluded {len(analysis.skipped_invalid_hosts)} destination(s) that aren't valid hostnames — "
+            f"the egress API rejects them as DNS_NAME internet destinations (an apply failed on "
+            f"'local' before this check): {items}.",
         )
     if analysis.skipped_nonglobal_fqdns:
         items = ", ".join(

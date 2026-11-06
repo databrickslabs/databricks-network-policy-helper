@@ -38,6 +38,18 @@ If the table is empty, no egress policy is logging yet — start with step 1.
    - **GCS** `[<bucket>.]storage.googleapis.com` → storage rule.
    - **Azure** `<account>.<blob|dfs|file>.core.windows.net` → storage rule (account + service).
    - Bare `s3.<region>.amazonaws.com` (no bucket) → **skipped** (too broad to be a useful rule).
+   - **Databricks hosts** (workspace / Apps / AI-gateway / model-serving URLs) → never an internet
+     destination (the API rejects them). Where the **workspace id can be inferred** — Apps
+     `<app>-<workspace_id>.aws.databricksapps.com`, `<workspace_id>.ai-gateway…`, Azure `adb-<id>…`,
+     GCP `<id>.<n>.gcp…`, or an AWS deployment name resolved via the account API's workspace list
+     (same account only) — the workspace becomes a **cross-workspace egress destination**
+     (`allowed_databricks_destinations`; on by default, pre-checked selector interactively,
+     `--no-cross-workspace-destinations` to flag only; this workspace itself is never added).
+     Lakebase endpoints, docs/www/platform hosts and other accounts' workspaces stay **flagged** with
+     the reason. Remind the user: **both sides must agree** — the destination workspace's CBI policy
+     must also allow this workspace (cross-workspace access out of compatibility mode there).
+   - **Invalid hostnames** (single-label names like `local`, IP literals) → **excluded + flagged**;
+     the API rejects them as `DNS_NAME` destinations.
    - Everything else → **internet FQDN** allow rule.
 3. Optional cloud-owner lookup on internet FQDNs (`--enable-rdap`, on by default) — resolve the IP
    (audit-log `rdata` first, else DNS) and match it **offline** against the AWS/GCP/Azure/Databricks
@@ -77,8 +89,15 @@ If the table is empty, no egress policy is logging yet — start with step 1.
   all_workspaces), `--block-threat-domains` (feeds / Auth-Key / allowlist prompted interactively when
   not `off`; `DBX_NWP_ABUSE_CH_AUTH_KEY` for headless abuse.ch feeds)
 - `--select-rules` / `--no-select-rules` — interactively curate which observed destinations to
-  allow-list (on by default in interactive runs, as two prompts: FQDNs then storage; skipped with
-  `--yes`)
+  allow-list (on by default in interactive runs, as three prompts: FQDNs, storage, then cross-workspace
+  destination workspaces; skipped with `--yes`)
+- `--cross-workspace-destinations` / `--no-cross-workspace-destinations` — turn egress to other
+  Databricks workspaces into `allowed_databricks_destinations` by inferred workspace id (default on).
+  Propose-only runs try a best-effort account client so AWS deployment names resolve in the preview.
+- `--uc-schema <catalog.schema>` / `--refresh-persisted` — persist the analysis to Unity Catalog:
+  `dbx_nwp_egress_daily` (per-day destination aggregate, incremental; re-aggregated instead of
+  re-scanning `outbound_network`) + `dbx_nwp_egress_suggestions` (each run's destinations and their
+  fate). Needs `CREATE TABLE` / `MODIFY` on the schema.
 - `--export <path>` — write the proposed `AccountNetworkPolicy` JSON (egress block + a `FULL_ACCESS`
   ingress default) for curl / the REST API, **and** a sibling best-effort Terraform `.tf`
   (`databricks_account_network_policy` — review before `terraform apply`); a directory writes
@@ -111,6 +130,7 @@ Egress policy limits: 100 internet destinations, 100 storage destinations per po
 ## Notes
 
 - The egress block replaces only the policy's `egress`; `ingress` / `ingress_dry_run` are untouched.
+  Updating an existing policy keeps any `allowed_databricks_destinations` workspace ids already on it.
 - Storage destinations and the CBI egress schema are documented at `docs/cbi-sdk-schema.md`.
 - Also runnable via `dbx-nwp-helper guided` (interactive Q&A).
 - New to the tool? `dbx-nwp-helper guide` opens a self-contained, offline companion guide

@@ -43,6 +43,11 @@ CONSOLIDATED_RULE_LABEL = "Consolidated-Observed-IPs"
 # Fixed table names created under --uc-schema <catalog.schema> (see core/persist.py).
 UC_DAILY_TABLE = "dbx_nwp_ingress_daily"
 UC_SUGGESTIONS_TABLE = "dbx_nwp_ingress_suggestions"
+UC_EGRESS_DAILY_TABLE = "dbx_nwp_egress_daily"
+UC_EGRESS_SUGGESTIONS_TABLE = "dbx_nwp_egress_suggestions"
+# Shortest policy name the interactive prompt accepts — a one-letter answer there is almost always a
+# stray "y" meant for a yes/no question (one such run created a policy literally named "y").
+MIN_POLICY_NAME_LEN = 3
 MAX_POLICIES_PER_ACCOUNT = 1000
 MAX_DENY_CIDRS = 5000
 # Egress limits.
@@ -208,6 +213,14 @@ class EgressConfig:
     # Interactively pick which observed destinations to allow-list (checkbox). On by default in
     # interactive runs; skipped under --yes / non-interactive or with --no-select-rules.
     select_rules: bool = True
+    # Turn observed egress to OTHER Databricks workspaces (workspace / Apps / AI-gateway URLs whose
+    # workspace id can be inferred) into cross-workspace egress destinations
+    # (`allowed_databricks_destinations`). Resolved workspaces are included by default (a pre-checked
+    # selector in interactive runs); --no-cross-workspace-destinations leaves them flagged only.
+    cross_workspace_destinations: bool = True
+    # Unity Catalog schema (catalog.schema) in which to persist the analysis — see IngressConfig.
+    uc_schema: str = ""
+    refresh_persisted: bool = False
     apply: ApplyOptions = field(default_factory=ApplyOptions)
 
 

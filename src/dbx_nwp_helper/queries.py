@@ -576,3 +576,106 @@ def suggestions_table_ddl(table: str) -> str:
     USING DELTA
     COMMENT 'dbx-nwp-helper: proposed ingress rules per run'
     """
+
+
+# ------------------------------------------------------------------ persisted egress daily aggregate
+# `egress --uc-schema` keeps a per-(event_date, workspace, source type, destination, destination type,
+# access type) aggregate of system.access.outbound_network, re-aggregated per run exactly like the
+# ingress daily table (see core/persist.py). Run-time filters (lookback, min events, source-type
+# filter, workspace scope) apply when reading it back.
+
+
+def egress_daily_table_ddl(table: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+      event_date DATE COMMENT 'Outbound event date (UTC)',
+      workspace_id STRING COMMENT 'Workspace whose serverless workload made the request',
+      network_source_type STRING COMMENT 'Serverless product (DBSQL, Apps, MLServing, …)',
+      destination STRING COMMENT 'FQDN / storage hostname / IP (coalesced from the dns/storage events)',
+      destination_type STRING COMMENT 'DNS | IP | STORAGE',
+      access_type STRING,
+      events BIGINT,
+      resolved_ips ARRAY<STRING> COMMENT 'DNS answers seen that day',
+      first_seen TIMESTAMP,
+      last_seen TIMESTAMP,
+      loaded_at TIMESTAMP COMMENT 'When dbx-nwp-helper wrote this row'
+    )
+    USING DELTA
+    COMMENT 'dbx-nwp-helper: per-day destination aggregate of system.access.outbound_network'
+    """
+
+
+def egress_daily_table_insert(table: str, start_date: str, end_date: str) -> str:
+    """Aggregate outbound_network rows with event_date in [start_date, end_date] (ISO, inclusive)."""
+    return f"""
+    INSERT INTO {table}
+    SELECT CAST(event_time AS DATE) AS event_date,
+      CAST(workspace_id AS STRING) AS workspace_id,
+      network_source_type,
+      COALESCE(dns_event.domain_name, storage_event.hostname, destination) AS destination,
+      destination_type,
+      access_type,
+      COUNT(*) AS events,
+      sort_array(array_distinct(flatten(collect_list(dns_event.rdata)))) AS resolved_ips,
+      MIN(event_time) AS first_seen, MAX(event_time) AS last_seen,
+      current_timestamp() AS loaded_at
+    FROM system.access.outbound_network
+    WHERE CAST(event_time AS DATE) BETWEEN DATE'{start_date}' AND DATE'{end_date}'
+      AND COALESCE(dns_event.domain_name, storage_event.hostname, destination) IS NOT NULL
+    GROUP BY 1, 2, 3, 4, 5, 6
+    """
+
+
+def persisted_observed_egress(
+    table: str,
+    lookback_days: int,
+    min_events: int,
+    source_type_filter: str,
+    only_workspace_id: int | None = None,
+) -> str:
+    """`observed_egress` re-aggregated from the persisted egress daily table — same output columns."""
+    src_filter = (
+        f"AND network_source_type = '{source_type_filter.replace(chr(39), chr(39) * 2)}'"
+        if source_type_filter
+        else ""
+    )
+    ws_filter = f"AND workspace_id = '{int(only_workspace_id)}'" if only_workspace_id is not None else ""
+    return f"""
+    SELECT destination,
+      destination_type,
+      SUM(events) AS events,
+      size(array_distinct(collect_list(access_type))) AS distinct_access_types,
+      sort_array(array_distinct(collect_list(access_type))) AS access_types,
+      sort_array(collect_set(network_source_type)) AS source_types,
+      sort_array(collect_set(workspace_id)) AS workspace_ids,
+      {_flat_distinct("resolved_ips")} AS resolved_ips,
+      MIN(first_seen) AS first_seen, MAX(last_seen) AS last_seen
+    FROM {table}
+    WHERE event_date >= current_date() - INTERVAL {lookback_days} DAYS
+      {src_filter}
+      {ws_filter}
+    GROUP BY destination, destination_type
+    HAVING SUM(events) >= {min_events}
+    ORDER BY events DESC
+    """
+
+
+def egress_suggestions_table_ddl(table: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+      run_id STRING COMMENT 'One id per dbx-nwp-helper egress run',
+      run_at TIMESTAMP,
+      workspace_id STRING COMMENT 'Workspace the run analysed (blank for all_workspaces)',
+      policy_name STRING,
+      policy_mode STRING,
+      policy_target STRING COMMENT '__ALL__ for single-policy scopes, else the per-workspace target',
+      kind STRING COMMENT 'internet | s3 | gcs | azure | databricks_workspace | blocked_domain',
+      destination STRING COMMENT 'FQDN, bucket, storage account, workspace id or domain',
+      detail STRING COMMENT 'region / storage service / inferred-from hosts / owner',
+      events BIGINT,
+      status STRING COMMENT 'allowed | blocked | deselected | capped | excluded_* | unresolved_workspace',
+      written BOOLEAN COMMENT 'Whether this run wrote the policy (--create-policy)'
+    )
+    USING DELTA
+    COMMENT 'dbx-nwp-helper: proposed egress destinations per run'
+    """

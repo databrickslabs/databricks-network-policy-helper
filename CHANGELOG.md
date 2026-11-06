@@ -13,6 +13,38 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-06
+
+### Added
+
+- **Cross-workspace egress destinations.** Observed serverless egress to *other* Databricks
+  workspaces (Apps, AI-gateway, Azure/GCP workspace hosts, and AWS deployment names resolved through
+  the account API's workspace list) is turned into `allowed_databricks_destinations` by workspace id
+  instead of being flagged as un-allow-listable. Interactive runs get a pre-checked selector;
+  `--yes` includes all resolved ids; `--no-cross-workspace-destinations` flags only. This workspace is
+  never a destination; Lakebase endpoints, platform hosts and other accounts' workspaces stay flagged
+  with a reason. Updating an existing policy's egress preserves workspace ids already on it. The run
+  reminds you that the destination workspace's ingress policy must also allow this one.
+- **`egress --uc-schema <catalog.schema>`.** Persists the outbound analysis like ingress does:
+  `dbx_nwp_egress_daily` (per-day destination aggregate of `system.access.outbound_network`, built
+  server-side and synced incrementally) is re-aggregated instead of re-scanning the table, and each
+  run's destinations and their fate (`allowed`, `blocked`, `deselected`, `capped`, `excluded_*`,
+  `unresolved_workspace`) are appended to `dbx_nwp_egress_suggestions`. `--refresh-persisted` rebuilds.
+  The guided wizard asks for the schema and the cross-workspace choice.
+
+### Changed
+
+- **Consolidation is offered before the first ingress preview is printed**, so a truncated policy
+  that is about to be rebuilt is never rendered in full and then discarded.
+- The interactive policy-name prompt rejects names shorter than 3 characters and asks again — a stray
+  `y` meant for a yes/no prompt once created a policy literally named `y`.
+
+### Fixed
+
+- **Egress apply failed with `'local' is not a valid hostname`.** Destinations that aren't valid
+  hostnames — single-label names such as `local` / `databricks`, IP literals, bad characters — are now
+  excluded from the allow-list and listed with the reason instead of reaching the API.
+
 ## [0.10.0] - 2026-11-05
 
 Scale release for large environments (thousands of source IPs / hundreds of owner groups).
@@ -398,7 +430,8 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.8.0...v0.8.1

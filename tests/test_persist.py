@@ -12,6 +12,7 @@ from dbx_nwp_helper import queries
 from dbx_nwp_helper.config import (
     UC_DAILY_TABLE,
     UC_SUGGESTIONS_TABLE,
+    EgressConfig,
     IngressConfig,
     validate_limits,
     validate_uc_schema,
@@ -116,7 +117,7 @@ def test_sync_daily_first_run_inserts_full_window(monkeypatch):
     _patch_sql(monkeypatch, rec)
     src = persist.tables("main.sec")
     notes = []
-    out = persist.sync_daily(
+    out = persist.sync_ingress_daily(
         None, src, IngressConfig(lookback_days=30, uc_schema="main.sec"), True, notes.append
     )
     assert out["rows_before"] == 0 and len(out["windows"]) == 1
@@ -133,7 +134,7 @@ def test_sync_daily_incremental_deletes_tail_then_inserts(monkeypatch):
     rec = _Recorder(lo=D(2026, 9, 1), hi=D(2026, 11, 4), rows=5000)
     _patch_sql(monkeypatch, rec)
     src = persist.tables("main.sec")
-    persist.sync_daily(
+    persist.sync_ingress_daily(
         None, src, IngressConfig(lookback_days=30, uc_schema="main.sec"), False, lambda _m: None
     )
     assert len(rec.executed) == 2
@@ -147,7 +148,7 @@ def test_sync_daily_refresh_clears_then_rebuilds(monkeypatch):
     _patch_sql(monkeypatch, rec)
     src = persist.tables("main.sec")
     cfg = IngressConfig(lookback_days=7, uc_schema="main.sec", refresh_persisted=True)
-    persist.sync_daily(None, src, cfg, True, lambda _m: None)
+    persist.sync_ingress_daily(None, src, cfg, True, lambda _m: None)
     assert rec.executed[0] == f"DELETE FROM {src.daily_table}"
     assert "DATE'2026-10-29' AND DATE'2026-11-05'" in rec.executed[1] and len(rec.executed) == 2
 
@@ -357,3 +358,169 @@ def test_analyze_with_uc_schema_reads_from_persisted_table(monkeypatch):
     assert any(t.startswith("INSERT INTO " + daily) for t in executed)
     assert not any("FROM system.access.audit" in q for q in seen)
     assert any(f"FROM {daily}" in q or f"SELECT * FROM {daily}" in q for q in seen)
+
+
+# --------------------------------------------------------------------------------- egress persistence
+def test_egress_tables_and_ddl():
+    src = persist.tables("main.sec")
+    assert src.egress_daily_table == "`main`.`sec`.`dbx_nwp_egress_daily`"
+    assert src.egress_suggestions_table == "`main`.`sec`.`dbx_nwp_egress_suggestions`"
+    ddl = queries.egress_daily_table_ddl(src.egress_daily_table)
+    assert "CREATE TABLE IF NOT EXISTS" in ddl and "resolved_ips ARRAY<STRING>" in ddl
+    ins = queries.egress_daily_table_insert(src.egress_daily_table, "2026-01-01", "2026-01-31")
+    assert "FROM system.access.outbound_network" in ins
+    assert "COALESCE(dns_event.domain_name, storage_event.hostname, destination) AS destination" in ins
+    assert "GROUP BY 1, 2, 3, 4, 5, 6" in ins
+
+
+def test_persisted_observed_egress_matches_live_columns():
+    q = queries.persisted_observed_egress("`t`", 30, 2, "", only_workspace_id=None)
+    for col in (
+        "destination",
+        "destination_type",
+        "AS events",
+        "AS distinct_access_types",
+        "AS access_types",
+        "AS source_types",
+        "AS workspace_ids",
+        "AS resolved_ips",
+        "AS first_seen",
+        "AS last_seen",
+    ):
+        assert col in q
+    assert "HAVING SUM(events) >= 2" in q and "INTERVAL 30 DAYS" in q
+    q = queries.persisted_observed_egress("`t`", 7, 1, "Apps", only_workspace_id=99)
+    assert "network_source_type = 'Apps'" in q and "workspace_id = '99'" in q
+
+
+def test_ensure_tables_egress_direction(monkeypatch):
+    rec = _Recorder()
+    _patch_sql(monkeypatch, rec)
+    persist.ensure_tables(None, persist.tables("main.sec"), direction="egress")
+    assert len(rec.executed) == 2
+    assert "dbx_nwp_egress_daily" in rec.executed[0] and "dbx_nwp_egress_suggestions" in rec.executed[1]
+
+
+def test_sync_egress_daily_uses_outbound_network(monkeypatch):
+    rec = _Recorder(lo=D(2026, 10, 1), hi=D(2026, 11, 4), rows=10)
+    _patch_sql(monkeypatch, rec)
+    src = persist.tables("main.sec")
+    notes = []
+    persist.sync_egress_daily(None, src, EgressConfig(lookback_days=14, uc_schema="main.sec"), notes.append)
+    assert rec.executed[0].startswith(f"DELETE FROM {src.egress_daily_table}")
+    assert "FROM system.access.outbound_network" in rec.executed[1]
+    assert any("system.access.outbound_network" in n for n in notes)
+
+
+def test_egress_analyze_with_uc_schema_reads_persisted_table(monkeypatch):
+    from dbx_nwp_helper.core import egress as eg
+
+    seen, executed = [], []
+    daily = "`main`.`sec`.`dbx_nwp_egress_daily`"
+
+    def fake_query(_conn, text):
+        seen.append(" ".join(text.split()))
+        if "AS lo" in text:
+            return pd.DataFrame([{"lo": None, "hi": None, "rows": 0}])
+        if "AS today" in text:
+            return pd.DataFrame([{"today": D(2026, 11, 6)}])
+        if daily in text:
+            return pd.DataFrame(
+                [
+                    {
+                        "destination": "api.openai.com",
+                        "destination_type": "DNS",
+                        "events": 5,
+                        "workspace_ids": ["1"],
+                        "resolved_ips": ["1.2.3.4"],
+                    }
+                ]
+            )
+        raise AssertionError(f"unexpected live query: {text[:120]}")
+
+    import dbx_nwp_helper.sql as sqlmod
+
+    monkeypatch.setattr(sqlmod, "query", fake_query)
+    monkeypatch.setattr(sqlmod, "execute", lambda _c, t: executed.append(" ".join(t.split())))
+    cfg = EgressConfig(
+        enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces", uc_schema="main.sec"
+    )
+    a = eg.analyze(cfg, None)
+    assert eg.union(a.targets, "internet") == {"api.openai.com": 5}
+    assert any(t.startswith("CREATE TABLE IF NOT EXISTS " + daily) for t in executed)
+    assert any(t.startswith("INSERT INTO " + daily) for t in executed)
+    assert not any("FROM system.access.outbound_network" in q for q in seen)
+
+
+def test_egress_snapshot_rows_classify_every_destination(monkeypatch):
+    from dbx_nwp_helper.core import egress as eg
+
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": d,
+                "destination_type": "DNS",
+                "events": n,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            }
+            for d, n in [
+                ("api.openai.com", 50),
+                ("gone.example.com", 9),
+                ("bucket.s3.us-east-1.amazonaws.com", 7),
+                ("mcp-x-7474650000000001.aws.databricksapps.com", 6),
+                ("other-7474650000000002.aws.databricksapps.com", 2),
+                ("docs.databricks.com", 1),
+                ("local", 3),
+            ]
+        ]
+    )
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, None)
+    full = {t: {k: dict(v) for k, v in d.items()} for t, d in a.targets.items()}
+    # operator deselects one FQDN and one cross-workspace destination
+    a.targets[eg.ALL_WORKSPACES]["internet"].pop("gone.example.com")
+    a.xws_selected = [7474650000000001]
+    blocks = eg.build_blocks(a, cfg)
+    rows = persist.egress_snapshot_rows(a, cfg, blocks, targets_full=full)
+    status = {(r["kind"], r["destination"]): r["status"] for r in rows}
+    assert status[("internet", "api.openai.com")] == "allowed"
+    assert status[("internet", "gone.example.com")] == "deselected"
+    assert status[("s3", "bucket")] == "allowed"
+    assert status[("databricks_workspace", "7474650000000001")] == "allowed"
+    assert status[("databricks_workspace", "7474650000000002")] == "deselected"
+    assert status[("databricks_workspace", "docs.databricks.com")] == "unresolved_workspace"
+    assert status[("internet", "local")] == "excluded_invalid_host"
+    s3 = next(r for r in rows if r["kind"] == "s3")
+    assert s3["detail"] == "us-east-1" and s3["events"] == 7
+
+
+def test_write_egress_suggestions_batches_literals(monkeypatch):
+    rec = _Recorder()
+    _patch_sql(monkeypatch, rec)
+    src = persist.tables("main.sec")
+    rows = [
+        {
+            "policy_target": "__ALL__",
+            "kind": "internet",
+            "destination": "api.openai.com",
+            "detail": None,
+            "events": 5,
+            "status": "allowed",
+        }
+    ]
+    run_id = persist.write_egress_suggestions(
+        None,
+        src,
+        rows,
+        cfg=EgressConfig(policy_mode="enforce"),
+        workspace_id=None,
+        policy_name="p",
+        written=True,
+    )
+    assert len(rec.executed) == 1
+    stmt = rec.executed[0]
+    assert stmt.startswith(f"INSERT INTO {src.egress_suggestions_table} (run_id, run_at")
+    assert f"'{run_id}', current_timestamp(), NULL, 'p', 'enforce', '__ALL__'" in stmt
+    assert "'internet', 'api.openai.com', NULL, 5, 'allowed', TRUE" in stmt

@@ -24,6 +24,7 @@ from ..config import (
     EgressConfig,
 )
 from ..feeds import cloud as cloud_feed
+from . import persist, xws
 from .enrich import as_list
 
 Note = Callable[[str], None]
@@ -95,6 +96,45 @@ class EgressAnalysis:
     # Truncation messages recorded when destinations were auto-capped to fit the per-policy egress
     # limits (see _blocked_domains / _warn_egress_limits). Drives the CLI truncation gate.
     truncations: list[str] = field(default_factory=list)
+    # Destinations that aren't valid hostnames (single-label names like "local", IP literals) — the
+    # API rejects them as DNS_NAME internet destinations. List of (host, reason) — flagged only.
+    skipped_invalid_hosts: list = field(default_factory=list)
+    # Every observed Databricks-domain host -> events (the input to cross-workspace resolution).
+    databricks_hosts: dict = field(default_factory=dict)
+    # Cross-workspace resolution of those hosts (core/xws.py), or None when none were observed.
+    xws: object | None = None
+    # Workspace ids the run will put in allowed_databricks_destinations (all resolved ids by default;
+    # the interactive selector may prune this list).
+    xws_selected: list[int] = field(default_factory=list)
+
+
+# RFC 1123 hostname label: alphanumerics and hyphens, no leading/trailing hyphen, 1-63 chars.
+_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def invalid_hostname_reason(host: str) -> str | None:
+    """Why `host` can't be an egress internet destination (the API validates DNS_NAME destinations as
+    hostnames), or None when it's a usable FQDN. Catches the single-label names ("local",
+    "databricks") and IP literals that DNS events can carry — a live apply failed with
+    "'local' is not a valid hostname" before this check existed."""
+    h = (host or "").strip().rstrip(".").lower()
+    if not h:
+        return "empty"
+    try:
+        ipaddress.ip_address(h)
+        return "ip-literal"
+    except ValueError:
+        pass
+    if len(h) > 253:
+        return "too-long"
+    labels = h.split(".")
+    if len(labels) < 2:
+        return "single-label"
+    if any(not _LABEL.match(lbl) for lbl in labels):
+        return "invalid-characters"
+    if labels[-1].isdigit():
+        return "numeric-tld"
+    return None
 
 
 def _classify(host: str) -> tuple[str, dict]:
@@ -114,8 +154,12 @@ def _classify(host: str) -> tuple[str, dict]:
         return "azure", {"account": a.group("acct"), "service": a.group("svc")}
     if _is_databricks_url(h):
         # A Databricks-owned URL (workspace / Apps / model-serving / platform) — unsupported as an
-        # egress internet destination; flagged and excluded rather than added (the API rejects it).
+        # egress internet destination (the API rejects it); may become a cross-workspace destination
+        # when its workspace id can be inferred (core/xws.py), else flagged and excluded.
         return "databricks_url", {"host": h}
+    reason = invalid_hostname_reason(h)
+    if reason:
+        return "skip_invalid_host", {"host": h, "reason": reason}
     return "internet", {"fqdn": h}
 
 
@@ -172,9 +216,14 @@ def analyze(
     this_workspace_id=None,
     workspace_cloud: str | None = None,
     status=None,
+    account=None,
+    own_workspace_id=None,
 ) -> EgressAnalysis:
     """`on_step(msg)` logs a persistent progress line; `status(msg)` (optional) is a context manager
-    for an animated spinner around a long blocking step (the query, the RDAP owner sweep)."""
+    for an animated spinner around a long blocking step (the query, the RDAP owner sweep). `account`
+    (optional AccountClient) enables the deployment-name → workspace-id lookup for cross-workspace
+    destinations; `own_workspace_id` is this workspace's id (never a cross-workspace destination) —
+    independent of the analysis scope."""
     from .. import queries, sql
 
     def _phase(msg):
@@ -184,18 +233,36 @@ def analyze(
     if only_ws is not None:
         on_step(f"Scope=current_workspace — restricting analysis to workspace {only_ws}.")
 
-    with _phase("Querying observed egress destinations… (large logs can take a few minutes)"):
-        observed = sql.query(
-            sql_conn,
-            queries.observed_egress(
-                cfg.lookback_days, cfg.min_events, cfg.source_type_filter, only_workspace_id=only_ws
-            ),
-        )
+    persisted = persist.tables(cfg.uc_schema) if cfg.uc_schema else None
+    if persisted is not None:
+        with _phase(f"Syncing the persisted egress daily table in {cfg.uc_schema}…"):
+            persist.ensure_tables(sql_conn, persisted, direction="egress")
+            persist.sync_egress_daily(sql_conn, persisted, cfg, on_step)
+        with _phase("Re-aggregating observed egress destinations from the persisted daily table…"):
+            observed = sql.query(
+                sql_conn,
+                queries.persisted_observed_egress(
+                    persisted.egress_daily_table,
+                    cfg.lookback_days,
+                    cfg.min_events,
+                    cfg.source_type_filter,
+                    only_workspace_id=only_ws,
+                ),
+            )
+    else:
+        with _phase("Querying observed egress destinations… (large logs can take a few minutes)"):
+            observed = sql.query(
+                sql_conn,
+                queries.observed_egress(
+                    cfg.lookback_days, cfg.min_events, cfg.source_type_filter, only_workspace_id=only_ws
+                ),
+            )
 
     targets = defaultdict(_new_target)
     fqdn_resolved_ips = {}
     skipped_bare_s3 = 0
-    skipped_dbx: dict[str, int] = {}  # Databricks workspace/app/serving URL -> events (flagged, excluded)
+    skipped_dbx: dict[str, int] = {}  # Databricks workspace/app/serving URL -> events (xws candidates)
+    skipped_invalid: dict[str, str] = {}  # host -> reason (not a valid hostname)
     s3_region_cache: dict[str, str | None] = {}  # bucket -> region (inferred once), None if unknown
     dropped_s3: dict[str, bool] = {}  # bucket -> True once dropped (dedupe warnings)
     for r in observed.to_dict(orient="records"):
@@ -226,8 +293,11 @@ def analyze(
                 if ip not in ips:
                     ips.append(ip)
         elif kind == "databricks_url":
-            # Unsupported as an egress internet destination — collect for the flag, never allow-list.
+            # Never an internet destination — collected for cross-workspace resolution / the flag.
             skipped_dbx[info["host"]] = skipped_dbx.get(info["host"], 0) + events
+            continue
+        elif kind == "skip_invalid_host":
+            skipped_invalid[info["host"]] = info["reason"]
             continue
         else:
             skipped_bare_s3 += 1
@@ -244,13 +314,31 @@ def analyze(
     if not targets:
         targets[ALL_WORKSPACES] = _new_target()
 
+    # Cross-workspace: turn the Databricks hosts into destination workspace ids where the id can be
+    # inferred; the rest stay flagged (skipped_databricks_urls) with a reason.
+    resolution = (
+        xws.resolve(skipped_dbx, account=account, own_workspace_id=own_workspace_id) if skipped_dbx else None
+    )
+    unresolved_hosts = sorted(h for h, _r in resolution.unresolved) if resolution else []
+    if resolution and resolution.resolved:
+        n_hosts = sum(len(i["hosts"]) for i in resolution.resolved.values())
+        on_step(
+            f"Cross-workspace: {len(resolution.resolved)} destination workspace(s) inferred from "
+            f"{n_hosts} Databricks host(s)"
+            + (" (account workspace list consulted)." if resolution.account_lookup else ".")
+        )
+
     analysis = EgressAnalysis(
         observed=observed,
         targets=dict(targets),
         skipped_bare_s3=skipped_bare_s3,
         dropped_s3_no_region=sorted(dropped_s3),
-        skipped_databricks_urls=sorted(skipped_dbx),
+        skipped_databricks_urls=unresolved_hosts,
         workspace_cloud=workspace_cloud,
+        skipped_invalid_hosts=sorted(skipped_invalid.items()),
+        databricks_hosts=dict(skipped_dbx),
+        xws=resolution,
+        xws_selected=list(resolution.workspace_ids) if resolution else [],
     )
 
     # Drop + flag storage destinations whose cloud doesn't match the workspace's — the egress API
@@ -643,9 +731,12 @@ def _flag_popular_block_candidates(analysis: EgressAnalysis, blocked: list, allo
 
 
 # ------------------------------------------------------------------------------- build + apply
-def _build_egress_block(t: dict, blocked_domains: list, policy_mode: str):
+def _build_egress_block(t: dict, blocked_domains: list, policy_mode: str, xws_ids: list[int] | None = None):
     from databricks.sdk.service.settings import (
         EgressNetworkPolicyNetworkAccessPolicy as EA,
+    )
+    from databricks.sdk.service.settings import (
+        EgressNetworkPolicyNetworkAccessPolicyDatabricksDestination as DbxDest,
     )
     from databricks.sdk.service.settings import (
         EgressNetworkPolicyNetworkAccessPolicyInternetDestination as InetDest,
@@ -720,20 +811,39 @@ def _build_egress_block(t: dict, blocked_domains: list, policy_mode: str):
     storage_ranked.sort(key=lambda e: (-e[0], e[1]))
     storage = [sd for _events, _key, sd in storage_ranked[:MAX_STORAGE_DESTINATIONS]]
 
+    # Cross-workspace egress destinations (other Databricks workspaces, by id).
+    dbx_dests = [DbxDest(workspace_ids=sorted({int(w) for w in xws_ids}))] if xws_ids else None
+
     enforcement_mode = EnforcementMode.DRY_RUN if policy_mode == "dry_run" else EnforcementMode.ENFORCED
     return NetworkPolicyEgress(
         network_access=EA(
             restriction_mode=RestrictionMode.RESTRICTED_ACCESS,
             allowed_internet_destinations=allowed_internet or None,
             allowed_storage_destinations=storage or None,
+            allowed_databricks_destinations=dbx_dests,
             blocked_internet_destinations=blocked_internet,
             policy_enforcement=Enforcement(enforcement_mode=enforcement_mode),
         )
     )
 
 
-def _target_has_content(t: dict, blocked_domains: list) -> bool:
-    return bool(t["s3"] or t["gcs"] or t["azure"] or t["internet"] or blocked_domains)
+def xws_ids_for_target(analysis: EgressAnalysis, cfg: EgressConfig, tgt) -> list[int]:
+    """The cross-workspace destination ids a target's egress block carries: the selected ids, minus
+    the target workspace itself under per_workspace scope (same-workspace traffic is always allowed),
+    or nothing when --no-cross-workspace-destinations."""
+    if not cfg.cross_workspace_destinations:
+        return []
+    ids = [int(w) for w in analysis.xws_selected]
+    if tgt != ALL_WORKSPACES:
+        try:
+            ids = [w for w in ids if w != int(tgt)]
+        except (TypeError, ValueError):
+            pass
+    return sorted(set(ids))
+
+
+def _target_has_content(t: dict, blocked_domains: list, xws_ids: list[int] | None = None) -> bool:
+    return bool(t["s3"] or t["gcs"] or t["azure"] or t["internet"] or blocked_domains or xws_ids)
 
 
 def _record_truncation(analysis: EgressAnalysis, msg: str, note: Note) -> None:
@@ -776,10 +886,11 @@ def build_blocks(analysis: EgressAnalysis, cfg: EgressConfig, note: Note = lambd
     """{policy_target -> NetworkPolicyEgress} for each target with content."""
     blocks = {}
     for tgt, t in analysis.targets.items():
-        if not _target_has_content(t, analysis.blocked_domains):
+        xws_ids = xws_ids_for_target(analysis, cfg, tgt)
+        if not _target_has_content(t, analysis.blocked_domains, xws_ids):
             continue
         _warn_egress_limits(analysis, t, tgt, note)
-        blocks[tgt] = _build_egress_block(t, analysis.blocked_domains, cfg.policy_mode)
+        blocks[tgt] = _build_egress_block(t, analysis.blocked_domains, cfg.policy_mode, xws_ids)
     return blocks
 
 

@@ -107,7 +107,7 @@ def analyze(
     if persisted is not None:
         with _phase(f"Syncing the persisted daily table in {cfg.uc_schema}…"):
             persist.ensure_tables(sql_conn, persisted)
-            persist.sync_daily(sql_conn, persisted, cfg, use_inet, on_step)
+            persist.sync_ingress_daily(sql_conn, persisted, cfg, use_inet, on_step)
         with _phase("Re-aggregating frequent public source IPs from the persisted daily table…"):
             candidates = sql.query(
                 sql_conn,
