@@ -401,8 +401,11 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   (`<workspace_id>.ai-gateway…`), Azure (`adb-<workspace_id>…`) and GCP hosts carry the id; AWS
   deployment names (`dbc-…cloud.databricks.com`) are resolved through the account API's workspace
   list, so only workspaces in **your** account resolve — and adds them to the policy (pre-checked
-  selector interactively; `--no-cross-workspace-destinations` to flag only). This workspace itself is
-  never a destination. Lakebase endpoints, docs/www and other platform hosts, and other accounts'
+  selector interactively; `--no-cross-workspace-destinations` to flag only). Every inferred id is
+  **verified** against the workspaces this metastore / account knows (`system.access.workspaces_latest`
+  plus the account API when available); unverified ids are shown but start unticked and are never
+  added under `--yes`. A host called only by the workspace in its own name (a workspace calling its own
+  App) is same-workspace traffic and is never a destination, nor is this workspace itself. Lakebase endpoints, docs/www and other platform hosts, and other accounts'
   workspaces stay flagged with the reason. **Both sides must agree**: each destination workspace's CBI
   policy must also allow this workspace (its cross-workspace access must be out of compatibility
   mode). Updating an existing policy's egress keeps any workspace ids already on it.

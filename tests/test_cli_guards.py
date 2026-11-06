@@ -2096,7 +2096,12 @@ def _xws_analysis(resolved):
 
     res = xws.XwsResolution()
     for wid, hosts, events in resolved:
-        res.resolved[wid] = {"hosts": list(hosts), "events": events, "methods": {"apps-url"}}
+        res.resolved[wid] = {
+            "hosts": list(hosts),
+            "events": events,
+            "methods": {"apps-url"},
+            "verified": True,
+        }
     a = EgressAnalysis(
         observed=pd.DataFrame(), targets={"__ALL__": {"s3": {}, "gcs": {}, "azure": {}, "internet": {}}}
     )
@@ -2199,4 +2204,37 @@ def test_egress_new_flags_reach_config(monkeypatch):
     cfg = captured["cfg"]
     assert (
         cfg.cross_workspace_destinations is False and cfg.uc_schema == "c.s" and cfg.refresh_persisted is True
+    )
+
+
+def test_select_xws_destinations_unticks_unverified_by_default(monkeypatch):
+    from dbx_nwp_helper.config import EgressConfig
+
+    a = _xws_analysis([(11, ["a-11.aws.databricksapps.com"], 5), (22, ["b-22.aws.databricksapps.com"], 1)])
+    a.xws.resolved[22]["verified"] = False
+    a.xws_selected = [11]
+    seen = {}
+
+    def fake_checkbox(title, choices):
+        seen["checked"] = {c.value: c.checked for c in choices}
+        return [c.value for c in choices if c.checked]  # operator presses Enter
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(cli, "_checkbox_keep", fake_checkbox)
+    cli._select_xws_destinations(a, EgressConfig(), yes=False)
+    assert seen["checked"] == {11: True, 22: False}
+    assert a.xws_selected == [11]
+
+
+def test_note_xws_destinations_warns_about_unverified(capsys):
+    from dbx_nwp_helper.config import EgressConfig
+
+    a = _xws_analysis([(11, ["a-11.aws.databricksapps.com"], 5), (22, ["b-22.aws.databricksapps.com"], 1)])
+    a.xws.resolved[22]["verified"] = False
+    a.xws_selected = [11]
+    cli._note_xws_destinations(a, EgressConfig())
+    out = " ".join(_plain(capsys.readouterr().out).split())
+    assert (
+        "1 inferred destination id(s) are not known to this metastore or account and were NOT added: 22"
+        in out
     )

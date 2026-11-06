@@ -48,18 +48,30 @@ _PLATFORM_LABELS = {"www", "docs", "community", "accounts", "help", "kb", "statu
 class XwsResolution:
     """Outcome of resolving the observed Databricks hosts for one run."""
 
-    # {workspace_id -> {"hosts": [host, …], "events": int, "methods": {method, …}}}
+    # {workspace_id -> {"hosts": [host, …], "events": int, "methods": {method, …},
+    #                    "verified": True | False | None}}
+    # verified: True = the id is a workspace this run can see (metastore workspace table, account
+    # API, or a source workspace in the outbound log); False = none of those know it (another
+    # account's workspace, or a host whose digits aren't a workspace id); None = no source to check.
     resolved: dict[int, dict] = field(default_factory=dict)
     # [(host, reason)] — Databricks hosts that can't become cross-workspace destinations.
     unresolved: list[tuple[str, str]] = field(default_factory=list)
-    # Hosts that map to THIS workspace (same-workspace traffic is always allowed; nothing to add).
+    # Hosts whose traffic is same-workspace only (the calling workspace IS the destination, or it's
+    # this workspace) — always allowed, nothing to add.
     own: list[str] = field(default_factory=list)
     # True when an account client was available for the deployment-name lookup.
     account_lookup: bool = False
+    # True when a set of known workspace ids was available to verify against.
+    verification: bool = False
 
     @property
     def workspace_ids(self) -> list[int]:
         return sorted(self.resolved)
+
+    @property
+    def verified_ids(self) -> list[int]:
+        """Ids safe to include by default: verified, or unverifiable because nothing could check."""
+        return sorted(w for w, i in self.resolved.items() if i.get("verified") is not False)
 
 
 def workspace_id_from_host(host: str) -> tuple[int | None, str]:
@@ -109,13 +121,35 @@ def _deployment_map(account) -> dict[str, int]:
         return {}
 
 
-def resolve(hosts: dict[str, int], account=None, own_workspace_id=None) -> XwsResolution:
+def resolve(
+    hosts: dict[str, int],
+    account=None,
+    own_workspace_id=None,
+    *,
+    sources: dict[str, set[int]] | None = None,
+    known_workspace_ids: set[int] | None = None,
+) -> XwsResolution:
     """Resolve `{host: events}` of observed Databricks hostnames into cross-workspace destinations.
+
     `account` (an AccountClient, optional) enables the deployment-name lookup for AWS workspace URLs.
-    This workspace's own id is never a destination."""
+    `sources` maps host → the set of workspace ids whose workloads called it (from the outbound log):
+    a host called ONLY by the workspace it belongs to is same-workspace traffic, not cross-workspace,
+    and is reported under `own` instead of becoming a destination (an Apps URL carries its own
+    workspace id, so under all_workspaces scope every workspace calling its own app would otherwise
+    "resolve" to itself). This workspace's own id is never a destination either.
+    `known_workspace_ids` (metastore workspace table ∪ account API ∪ observed source workspaces) lets
+    each resolved id be marked verified / unverified; None = no verification possible."""
     res = XwsResolution()
     deployments: dict[str, int] | None = None
     own = int(own_workspace_id) if own_workspace_id is not None else None
+    sources = sources or {}
+    if known_workspace_ids is not None:
+        res.verification = True
+        known = {int(w) for w in known_workspace_ids}
+        for srcs in sources.values():
+            known.update(int(w) for w in srcs)
+    else:
+        known = None
     for host, events in sorted(hosts.items()):
         wid, how = workspace_id_from_host(host)
         if wid is None and how == "aws-deployment-name":
@@ -133,10 +167,14 @@ def resolve(hosts: dict[str, int], account=None, own_workspace_id=None) -> XwsRe
         if wid is None:
             res.unresolved.append((host, how))
             continue
-        if own is not None and wid == own:
-            res.own.append(host)
+        callers = {int(w) for w in sources.get(host, set())}
+        if (own is not None and wid == own) or (callers and callers <= {wid}):
+            res.own.append(host)  # this workspace, or only ever called by itself → same-workspace
             continue
-        entry = res.resolved.setdefault(wid, {"hosts": [], "events": 0, "methods": set()})
+        entry = res.resolved.setdefault(
+            wid,
+            {"hosts": [], "events": 0, "methods": set(), "verified": None if known is None else wid in known},
+        )
         entry["hosts"].append(host)
         entry["events"] += int(events or 0)
         entry["methods"].add(how)

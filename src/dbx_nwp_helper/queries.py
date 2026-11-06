@@ -679,3 +679,10 @@ def egress_suggestions_table_ddl(table: str) -> str:
     USING DELTA
     COMMENT 'dbx-nwp-helper: proposed egress destinations per run'
     """
+
+
+def metastore_workspace_ids() -> str:
+    """Every workspace id the metastore knows (system.access.workspaces_latest — all workspaces in the
+    account, including banned/deleted ones). Used to verify inferred cross-workspace destination ids
+    without account-admin credentials; the caller treats a missing table as "no verification"."""
+    return "SELECT DISTINCT CAST(workspace_id AS BIGINT) AS workspace_id FROM system.access.workspaces_latest"

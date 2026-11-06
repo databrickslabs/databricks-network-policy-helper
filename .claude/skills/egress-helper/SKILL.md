@@ -44,7 +44,11 @@ If the table is empty, no egress policy is logging yet — start with step 1.
      GCP `<id>.<n>.gcp…`, or an AWS deployment name resolved via the account API's workspace list
      (same account only) — the workspace becomes a **cross-workspace egress destination**
      (`allowed_databricks_destinations`; on by default, pre-checked selector interactively,
-     `--no-cross-workspace-destinations` to flag only; this workspace itself is never added).
+     `--no-cross-workspace-destinations` to flag only). Ids are **verified** against
+     `system.access.workspaces_latest` + the account workspace list; unverified ids start unticked and
+     are never added under `--yes` (they may be another account's workspace — confirm with its owner).
+     A host called only by its own workspace (a workspace calling its own App) is same-workspace
+     traffic, not a destination; neither is this workspace itself.
      Lakebase endpoints, docs/www/platform hosts and other accounts' workspaces stay **flagged** with
      the reason. Remind the user: **both sides must agree** — the destination workspace's CBI policy
      must also allow this workspace (cross-workspace access out of compatibility mode there).

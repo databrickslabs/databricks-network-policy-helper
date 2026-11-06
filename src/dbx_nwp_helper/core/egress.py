@@ -262,6 +262,7 @@ def analyze(
     fqdn_resolved_ips = {}
     skipped_bare_s3 = 0
     skipped_dbx: dict[str, int] = {}  # Databricks workspace/app/serving URL -> events (xws candidates)
+    dbx_sources: dict[str, set[int]] = {}  # Databricks host -> source workspace ids that called it
     skipped_invalid: dict[str, str] = {}  # host -> reason (not a valid hostname)
     s3_region_cache: dict[str, str | None] = {}  # bucket -> region (inferred once), None if unknown
     dropped_s3: dict[str, bool] = {}  # bucket -> True once dropped (dedupe warnings)
@@ -295,6 +296,12 @@ def analyze(
         elif kind == "databricks_url":
             # Never an internet destination — collected for cross-workspace resolution / the flag.
             skipped_dbx[info["host"]] = skipped_dbx.get(info["host"], 0) + events
+            callers = dbx_sources.setdefault(info["host"], set())
+            for w in as_list(r.get("workspace_ids")):
+                try:
+                    callers.add(int(w))
+                except (TypeError, ValueError):
+                    pass
             continue
         elif kind == "skip_invalid_host":
             skipped_invalid[info["host"]] = info["reason"]
@@ -316,9 +323,23 @@ def analyze(
 
     # Cross-workspace: turn the Databricks hosts into destination workspace ids where the id can be
     # inferred; the rest stay flagged (skipped_databricks_urls) with a reason.
-    resolution = (
-        xws.resolve(skipped_dbx, account=account, own_workspace_id=own_workspace_id) if skipped_dbx else None
-    )
+    resolution = None
+    if skipped_dbx:
+        known_ids = _known_workspace_ids(sql_conn, account)
+        resolution = xws.resolve(
+            skipped_dbx,
+            account=account,
+            own_workspace_id=own_workspace_id,
+            sources=dbx_sources,
+            known_workspace_ids=known_ids,
+        )
+        if resolution.resolved and known_ids is not None:
+            unverified = [w for w, i in resolution.resolved.items() if i.get("verified") is False]
+            if unverified:
+                on_step(
+                    f"Cross-workspace: {len(unverified)} inferred destination id(s) are NOT known to this "
+                    "metastore/account — possibly another account's workspace; left unticked for review."
+                )
     unresolved_hosts = sorted(h for h, _r in resolution.unresolved) if resolution else []
     if resolution and resolution.resolved:
         n_hosts = sum(len(i["hosts"]) for i in resolution.resolved.values())
@@ -338,7 +359,7 @@ def analyze(
         skipped_invalid_hosts=sorted(skipped_invalid.items()),
         databricks_hosts=dict(skipped_dbx),
         xws=resolution,
-        xws_selected=list(resolution.workspace_ids) if resolution else [],
+        xws_selected=list(resolution.verified_ids) if resolution else [],
     )
 
     # Drop + flag storage destinations whose cloud doesn't match the workspace's — the egress API
@@ -364,6 +385,30 @@ def analyze(
 _CLOUD_OWNERS = {"AWS", "GCP", "AZURE", "Azure", "ORACLE", "Oracle"}
 # Owner values that mean "we couldn't identify it" rather than a real provider name.
 _UNKNOWN_OWNERS = {None, "Unknown", "DNS_RESOLUTION_FAILED"}
+
+
+def _known_workspace_ids(sql_conn, account) -> set[int] | None:
+    """Workspace ids this run can vouch for: the metastore's workspace table (no account creds needed)
+    plus the account API's list when a client is available. None when neither source answered."""
+    from .. import queries, sql
+
+    known: set[int] = set()
+    found = False
+    try:
+        df = sql.query(sql_conn, queries.metastore_workspace_ids())
+        known.update(int(w) for w in df["workspace_id"].dropna().tolist())
+        found = True
+    except Exception:  # noqa: BLE001 - table absent / no access → fall through
+        pass
+    if account is not None:
+        try:
+            for ws in account.workspaces.list():
+                if getattr(ws, "workspace_id", None):
+                    known.add(int(ws.workspace_id))
+            found = True
+        except Exception:  # noqa: BLE001
+            pass
+    return known if found else None
 
 
 def recommend(hosting_owner: str | None) -> str:

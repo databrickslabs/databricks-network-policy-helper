@@ -2680,19 +2680,36 @@ def _select_xws_destinations(analysis, cfg: EgressConfig, yes: bool) -> None:
     res = analysis.xws
     if res is None or not res.resolved:
         return
-    entries = []
+    import questionary
+
+    choices = []
     for wid, info in sorted(res.resolved.items(), key=lambda kv: -kv[1]["events"]):
-        hosts = ", ".join(info["hosts"][:2]) + (
-            f" +{len(info['hosts']) - 2} more" if len(info["hosts"]) > 2 else ""
+        hosts = ", ".join(info["hosts"][:2])
+        if len(info["hosts"]) > 2:
+            hosts += f" +{len(info['hosts']) - 2} more"
+        verified = info.get("verified")
+        tag = {
+            True: "verified",
+            False: "NOT in this metastore/account — other account? verify first",
+            None: "unverified",
+        }[verified]
+        choices.append(
+            questionary.Choice(
+                title=f"workspace {wid}  ({info['events']} events; {tag}; from {hosts})",
+                value=wid,
+                checked=verified is not False,  # unverified ids start unticked
+            )
         )
-        entries.append((wid, f"workspace {wid}  ({info['events']} events; from {hosts})"))
-    kept = _egress_pick(
-        "Select the cross-workspace destination workspaces to allow (space=toggle, enter=confirm):", entries
+    kept = _checkbox_keep(
+        "Select the cross-workspace destination workspaces to allow (space=toggle, enter=confirm):", choices
     )
-    dropped = {wid for wid, _t in entries} - kept
+    if kept is None:
+        console.banner("info", "Selection cancelled — aborting, nothing written.")
+        raise typer.Exit(code=0)
+    analysis.xws_selected = sorted(int(w) for w in kept)
+    dropped = len(res.resolved) - len(kept)
     if dropped:
-        analysis.xws_selected = [w for w in analysis.xws_selected if w not in dropped]
-        console.banner("info", f"Excluded {len(dropped)} cross-workspace destination(s) from your selection.")
+        console.banner("info", f"Excluded {dropped} cross-workspace destination(s) from your selection.")
 
 
 def _note_xws_destinations(analysis, cfg: EgressConfig) -> None:
@@ -2716,6 +2733,15 @@ def _note_xws_destinations(analysis, cfg: EgressConfig) -> None:
             "info",
             f"{len(res.resolved)} destination workspace(s) were inferred from the Databricks hosts but "
             "--no-cross-workspace-destinations is set, so they are flagged only.",
+        )
+    unverified = [w for w, i in res.resolved.items() if i.get("verified") is False and w not in selected]
+    if unverified and cfg.cross_workspace_destinations:
+        console.banner(
+            "warn",
+            f"{len(unverified)} inferred destination id(s) are not known to this metastore or account and "
+            f"were NOT added: {', '.join(str(w) for w in sorted(unverified))}. They may be workspaces in "
+            "another account (cross-account egress is allowed) — confirm the id with its owner and tick it "
+            "in the selector, or add it in the console.",
         )
 
 

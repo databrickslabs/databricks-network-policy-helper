@@ -393,8 +393,17 @@ def egress_analysis(analysis: EgressAnalysis, cfg: EgressConfig | None = None) -
                         "events": info["events"],
                         "inferred_from": ", ".join(info["hosts"]),
                         "method": ", ".join(sorted(info["methods"])),
+                        "verified": {True: "yes", False: "NO — not in this metastore/account", None: "n/a"}[
+                            info.get("verified")
+                        ],
                         "recommendation": (
-                            "ALLOW — cross-workspace destination" if on else "FLAGGED — cross-workspace off"
+                            (
+                                "ALLOW — cross-workspace destination"
+                                if info.get("verified") is not False
+                                else "REVIEW — unverified id"
+                            )
+                            if on
+                            else "FLAGGED — cross-workspace off"
                         ),
                     }
                     for wid, info in sorted(res.resolved.items(), key=lambda kv: -kv[1]["events"])
@@ -407,9 +416,15 @@ def egress_analysis(analysis: EgressAnalysis, cfg: EgressConfig | None = None) -
             "Egress to another Databricks workspace can't be an internet destination (the API rejects "
             "Databricks hosts) but CAN be allowed as a cross-workspace destination by workspace id. The "
             "ids above were inferred from the observed hostnames"
-            + (" (AWS deployment names via the account workspace list)." if res.account_lookup else ".")
+            + (" (AWS deployment names via the account workspace list)" if res.account_lookup else "")
             + (
-                " They'll be added to allowed_databricks_destinations."
+                " and checked against the workspaces this metastore/account knows."
+                if res.verification
+                else "; no workspace list was available to verify them."
+            )
+            + (
+                " Verified ids will be added to allowed_databricks_destinations; unverified ones only "
+                "if you tick them."
                 if on
                 else " --no-cross-workspace-destinations is set, so they're flagged only."
             ),
@@ -417,8 +432,9 @@ def egress_analysis(analysis: EgressAnalysis, cfg: EgressConfig | None = None) -
     if res is not None and res.own:
         console.banner(
             "info",
-            f"{len(res.own)} Databricks host(s) belong to THIS workspace — same-workspace traffic is always "
-            f"allowed, nothing to add: {', '.join(res.own)}.",
+            f"{len(res.own)} Databricks host(s) are same-workspace traffic (a workspace calling its own "
+            f"Apps / AI-gateway / API, or this workspace) — always allowed, nothing to add: "
+            f"{', '.join(res.own)}.",
         )
     if analysis.skipped_databricks_urls:
         from .core import xws as xws_core

@@ -21,8 +21,11 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
   workspaces (Apps, AI-gateway, Azure/GCP workspace hosts, and AWS deployment names resolved through
   the account API's workspace list) is turned into `allowed_databricks_destinations` by workspace id
   instead of being flagged as un-allow-listable. Interactive runs get a pre-checked selector;
-  `--yes` includes all resolved ids; `--no-cross-workspace-destinations` flags only. This workspace is
-  never a destination; Lakebase endpoints, platform hosts and other accounts' workspaces stay flagged
+  `--yes` includes all **verified** ids; `--no-cross-workspace-destinations` flags only. Inferred ids are
+  verified against `system.access.workspaces_latest` and the account API's workspace list; unverified
+  ids (another account's workspace, or digits that aren't an id) start unticked and are never added
+  under `--yes`. Same-workspace traffic — a workspace calling its own App / AI gateway — and this
+  workspace are never destinations; Lakebase endpoints, platform hosts and other accounts' workspaces stay flagged
   with a reason. Updating an existing policy's egress preserves workspace ids already on it. The run
   reminds you that the destination workspace's ingress policy must also allow this one.
 - **`egress --uc-schema <catalog.schema>`.** Persists the outbound analysis like ingress does:

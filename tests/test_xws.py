@@ -298,3 +298,93 @@ def test_apply_egress_update_preserves_console_added_workspaces():
     assert acct.network_policies.sent.egress.network_access.allowed_databricks_destinations[
         0
     ].workspace_ids == [7, 42]
+
+
+# ------------------------------------------------------------------------------ same-workspace + verification
+def test_resolve_treats_host_called_only_by_its_own_workspace_as_same_workspace():
+    # The live finding: under all_workspaces scope every workspace calling its OWN app "resolved" to
+    # itself. A host whose only callers are the workspace in its hostname is not cross-workspace.
+    hosts = {
+        "mcp-store-sp-7474656978175256.aws.databricksapps.com": 5,
+        "shared-app-7474650000000001.aws.databricksapps.com": 9,
+    }
+    sources = {
+        "mcp-store-sp-7474656978175256.aws.databricksapps.com": {7474656978175256},
+        "shared-app-7474650000000001.aws.databricksapps.com": {7474650000000001, 7474650000000002},
+    }
+    res = xws.resolve(hosts, sources=sources)
+    assert res.own == ["mcp-store-sp-7474656978175256.aws.databricksapps.com"]
+    assert res.workspace_ids == [7474650000000001]  # also called by another workspace → genuine xws
+
+
+def test_resolve_marks_ids_verified_against_known_workspaces():
+    hosts = {
+        "a-7474650000000001.aws.databricksapps.com": 1,
+        "b-7474650000000002.aws.databricksapps.com": 1,
+        "c-7474650000000003.aws.databricksapps.com": 1,
+    }
+    sources = {"c-7474650000000003.aws.databricksapps.com": {7474650000000009}}  # caller is a known ws
+    res = xws.resolve(hosts, sources=sources, known_workspace_ids={7474650000000001})
+    assert res.verification is True
+    assert res.resolved[7474650000000001]["verified"] is True
+    assert res.resolved[7474650000000002]["verified"] is False
+    assert res.resolved[7474650000000003]["verified"] is False  # callers count as known, destinations don't
+    assert res.verified_ids == [7474650000000001]
+    res = xws.resolve(hosts, sources=sources)  # nothing to verify against
+    assert res.verification is False and all(i["verified"] is None for i in res.resolved.values())
+    assert res.verified_ids == [7474650000000001, 7474650000000002, 7474650000000003]
+
+
+def test_analyze_defaults_selection_to_verified_ids_only(monkeypatch):
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "known-7474650000000001.aws.databricksapps.com",
+                "destination_type": "DNS",
+                "events": 4,
+                "workspace_ids": [7474650000000009],
+                "resolved_ips": [],
+            },
+            {
+                "destination": "foreign-7474650000000002.aws.databricksapps.com",
+                "destination_type": "DNS",
+                "events": 4,
+                "workspace_ids": [7474650000000009],
+                "resolved_ips": [],
+            },
+            {  # a workspace calling its own app → same-workspace, never a destination
+                "destination": "self-7474650000000009.aws.databricksapps.com",
+                "destination_type": "DNS",
+                "events": 40,
+                "workspace_ids": [7474650000000009],
+                "resolved_ips": [],
+            },
+        ]
+    )
+
+    def fake_query(_c, text):
+        if "workspaces_latest" in text:
+            return pd.DataFrame([{"workspace_id": 7474650000000001}, {"workspace_id": 7474650000000009}])
+        return observed
+
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", fake_query)
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, sql_conn=None)
+    assert a.xws.own == ["self-7474650000000009.aws.databricksapps.com"]
+    assert a.xws.workspace_ids == [7474650000000001, 7474650000000002]
+    assert a.xws_selected == [7474650000000001]  # the unverified id is reported but not pre-selected
+    na = eg.build_blocks(a, cfg)[eg.ALL_WORKSPACES].as_dict()["network_access"]
+    assert na["allowed_databricks_destinations"] == [{"workspace_ids": [7474650000000001]}]
+
+
+def test_known_workspace_ids_merges_metastore_and_account(monkeypatch):
+    acct = _Acct([("dep", 7474650000000005)])
+    monkeypatch.setattr(
+        "dbx_nwp_helper.sql.query", lambda _c, _t: pd.DataFrame([{"workspace_id": 7474650000000001}])
+    )
+    assert eg._known_workspace_ids(None, acct) == {7474650000000001, 7474650000000005}
+    monkeypatch.setattr(
+        "dbx_nwp_helper.sql.query", lambda _c, _t: (_ for _ in ()).throw(RuntimeError("no table"))
+    )
+    assert eg._known_workspace_ids(None, None) is None
+    assert eg._known_workspace_ids(None, acct) == {7474650000000005}
