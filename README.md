@@ -82,6 +82,15 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 
 **Both also take** `--policy-scope current_workspace\|per_workspace\|all_workspaces`, `--policy-action create_new\|add_to_existing` + `--existing-policy-id <id>` (compose a combined policy), `--lookback-days`, `--min-events`, `--enable-rdap`, and `--select-rules`/`--no-select-rules` (interactively curate which rules/destinations to include — **on by default** in interactive runs).
 
+**Large environments (`ingress`):**
+
+| Option | What it does |
+|---|---|
+| `--consolidate-rules` / `--no-consolidate-rules` | When the proposed allow rules exceed the **50-rule** cap, fold the lowest-traffic owner groups into **`Consolidated-Observed-IPs`** rule(s) so their IPs stay in the policy (only the 2,000-CIDR cap can still drop IPs). Default: **prompt** when a cap is hit; `--yes` consolidates. If the CIDR cap still bites and partner-platform ranges are present, an interactive run also offers to leave those CIDRs out in favour of the console's managed **Partner platforms** source. |
+| `--uc-schema <catalog.schema>` | **Persist the analysis to Unity Catalog.** Maintains `dbx_nwp_ingress_daily` — a per-day source-IP aggregate of `system.access.audit`, built server-side and **updated incrementally** (only the days the table lacks, plus the two most recent, are re-read) — and re-aggregates it instead of re-scanning the audit log on every run. Each run also records its proposed rules and their fate (kept / consolidated / dropped / deselected / excluded) in `dbx_nwp_ingress_suggestions`. `--refresh-persisted` rebuilds the daily table. |
+
+RDAP owner lookups are also cached on disk for 30 days (`feeds list` shows `rdap_owners`), so re-runs over the same IPs skip the slow RIR calls.
+
 **Command-specific:**
 
 - 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--block-threat-ips` (off/matched_only/all — interactive feed picker when not off), `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--include-inbound-network` (use dry-run CBI denials as allow-list candidates; on by default), `--disable-existing-ip-acls` (enforce mode only). Existing IP access lists are **auto-detected** and you're prompted (a per-entry checkbox) to migrate them; on AWS/GCP the workspace's **legacy private access posture** is likewise **auto-detected** and recreated in a `private_access` block — an endpoint-scoped PAS → its endpoints (*"Inbound private endpoints"*), **no PAS → deny-all private** (a no-PAS workspace accepts no private endpoints today), plus a *"Classic compute REST API endpoint"* rule for any back-end PrivateLink REST endpoint; an account-level PAS keeps CBI's allow-all default unless a stricter existing CBI `private_access` is already there (which wins) — no flags. If the assigned CBI policy already has restrictive public **or** private rules, the generated policy **inherits its enforcement mode** (`--policy-mode` is ignored). (Azure doesn't migrate PrivateLink.)
@@ -102,7 +111,7 @@ flowchart TD
     A(["dbx-nwp-helper ingress"]) --> B{"Confirm target workspace?<br/>(profile / URL / id)"}
     B -->|no| X1["Abort — nothing written"]
     B -->|yes| C["Resolve policy name<br/>--policy-name / prompt; blank = profile"]
-    C --> D["Analyse system.access.audit source IPs<br/>enrich: threat feeds, cloud + Databricks ranges, RDAP"]
+    C --> D["Analyse system.access.audit source IPs<br/>(or the persisted daily table with --uc-schema)<br/>enrich: threat feeds, cloud + Databricks ranges, RDAP (disk-cached)"]
     D --> E["Frame CIDRs: minimal / optimal / maximum"]
     E --> F{"Scoping mode"}
     F -->|ip_only| G["One rule set: these CIDRs, all destinations"]
@@ -113,7 +122,12 @@ flowchart TD
     G3 --> FEPL
     FEPL["Per dimension: migrate or carry forward existing CBI block<br/>AWS/GCP: PAS endpoints / no PAS = deny-all → private_access (+ back-end REST rule); Azure: no PL migration<br/>existing public (if nothing to build) + cross-workspace copied forward<br/>existing restrictive public/private → inherit its mode"] --> H
     H["Existing IP ACLs auto-detected → prompt to migrate (kept with traffic rules)<br/>partner-platform IPs (Power BI / dbt / Tableau) flagged + recommended<br/>+ threat-deny rules + deny-denied-IPs optional<br/>cross-workspace left in compatibility mode"] --> P["Preview proposed policy"]
-    P --> EXP{"--export?"}
+    P --> CAP{"Over the 50-rule / 2,000-CIDR cap?"}
+    CAP -->|no| EXP
+    CAP -->|"yes → offer: consolidate low-traffic rules<br/>into Consolidated-Observed-IPs"| CONS["Rebuild + re-preview<br/>(then offer: leave partner CIDRs to the console source)"]
+    CONS --> TR{"Still truncated?<br/>loud red panel — continue / reselect / abort"}
+    TR --> EXP
+    EXP{"--export?"}
     EXP -->|yes| EXPW["Write JSON + Terraform"]
     EXP -->|no| CR{"--create-policy?"}
     EXPW --> CR
@@ -379,6 +393,28 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
 
 ## 📝 Notes & caveats
 
+- **Policy limits, consolidation & large environments.** A CBI policy holds at most **50 ingress
+  rules** and **2,000 CIDRs**. Every RDAP owner becomes its own labelled rule, so a large environment
+  (hundreds of owners, thousands of IPs) hits the rule cap long before the CIDR cap. Rather than drop
+  rules 51+, the `ingress` command **offers to consolidate**: the highest-traffic owners keep their
+  named rules and the rest are folded into **`Consolidated-Observed-IPs`** rule(s) (one per
+  destination/identity shape; Databricks-owned and migrated-IP-ACL rules are never folded; adjacent
+  CIDRs are merged losslessly). IPs are lost only when the CIDR cap itself is exceeded — and then an
+  interactive run offers to leave **partner-platform** CIDRs (Power BI / dbt / Tableau) out so you can
+  add those partners via the console's managed *Partner platforms* source instead (which Databricks
+  keeps current and which doesn't count against the cap). Any truncation that does happen is shown in
+  a **red panel** at the decision gate and again right before export / write. `--no-consolidate-rules`
+  restores the plain drop-the-tail behaviour.
+- **`--uc-schema catalog.schema` (ingress persistence).** For big audit logs the SQL step dominates.
+  With `--uc-schema` the tool keeps a per-(day, workspace, source IP, outcome) aggregate table
+  (`dbx_nwp_ingress_daily`) in your schema — written server-side via `INSERT … SELECT`, never through
+  the client — and only aggregates the days it doesn't already hold (the two most recent days are
+  always re-read to absorb late-arriving audit rows). Run-time filters (lookback, min events, IPv6,
+  null-status, workspace scope) are applied when reading the table back, so one table serves any
+  combination of flags. Each run also appends its proposed rules and what became of each
+  (`kept` / `consolidated` / `dropped` / `deselected` / `excluded_*`) to
+  `dbx_nwp_ingress_suggestions`, so the findings outlive the terminal session. Needs `CREATE TABLE` /
+  `MODIFY` on the schema; `--refresh-persisted` rebuilds the daily table from scratch.
 - **Policy naming.** Both commands (`ingress` / `egress`) name the policy the same way: they
   **prompt** for a name (blank = the profile name, falling back to the workspace id), or take
   `--policy-name` non-interactively. For single-policy scopes the name is the policy id; for

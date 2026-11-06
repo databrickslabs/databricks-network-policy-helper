@@ -7,6 +7,7 @@ choice sets here are the single source of truth for both Typer's validation and 
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 # --- Enumerated choice sets (shared by CLI flags + guided prompts) ---
@@ -30,10 +31,18 @@ DOMAIN_ALLOWLIST_FEEDS = ["cloudflare-top1k", "cisco_top1000", "majestic_million
 DEFAULT_ACCOUNT_HOST = "https://accounts.cloud.databricks.com"
 DEFAULT_NAME_PREFIX = "dbx-nwp"
 
-# Databricks account network-policy limits (warn + auto-cap so proposals stay valid).
+# Databricks account network-policy limits (warn + auto-cap so proposals stay valid). The rule and
+# CIDR caps are the platform defaults; Databricks can raise them for specific accounts, so the ingress
+# command takes hidden `--max-rules` / `--max-cidrs` overrides (IngressConfig.max_rules / max_cidrs).
 MAX_INGRESS_RULES_PER_POLICY = 50
 MAX_CIDRS_PER_POLICY = 2000
 MAX_IDENTITIES_PER_POLICY = 100
+# Label of the rule(s) low-traffic owner groups are folded into when a policy would otherwise exceed
+# the rule cap (see core/limits.consolidate). Fixed so operators can recognise it across runs.
+CONSOLIDATED_RULE_LABEL = "Consolidated-Observed-IPs"
+# Fixed table names created under --uc-schema <catalog.schema> (see core/persist.py).
+UC_DAILY_TABLE = "dbx_nwp_ingress_daily"
+UC_SUGGESTIONS_TABLE = "dbx_nwp_ingress_suggestions"
 MAX_POLICIES_PER_ACCOUNT = 1000
 MAX_DENY_CIDRS = 5000
 # Egress limits.
@@ -134,6 +143,26 @@ class IngressConfig:
     # Interactively pick which proposed allow rules to keep (checkbox), before they're built. On by
     # default in interactive runs; skipped under --yes / non-interactive or with --no-select-rules.
     select_rules: bool = True
+    # Policy limits applied when building rules. Platform defaults unless overridden via the hidden
+    # --max-rules / --max-cidrs options (or DBX_NWP_MAX_RULES / DBX_NWP_MAX_CIDRS) for accounts where
+    # Databricks has raised the caps.
+    max_rules: int = MAX_INGRESS_RULES_PER_POLICY
+    max_cidrs: int = MAX_CIDRS_PER_POLICY
+    # When the allow rules would exceed max_rules, fold the lowest-traffic owner groups into
+    # "Consolidated-Observed-IPs" rule(s) so their IPs stay in the policy instead of being dropped.
+    # None = undecided (the interactive run prompts when a cap is hit; --yes consolidates);
+    # True/False = decided up front via --consolidate-rules / --no-consolidate-rules.
+    consolidate_rules: bool | None = None
+    # Drop the partner-platform (Power BI / dbt / Tableau) CIDR rules from the generated policy — the
+    # operator will add those partners via the console's managed "Partner platforms" source instead.
+    # Offered interactively only when the CIDR cap still bites after consolidation.
+    exclude_partner_cidrs: bool = False
+    # Unity Catalog schema (catalog.schema) in which to persist the analysis: a per-day source-IP
+    # aggregate table maintained incrementally (so re-runs don't re-scan system.access.audit) plus a
+    # snapshot of each run's proposed rules. Blank = no persistence (everything is in memory).
+    uc_schema: str = ""
+    # Rebuild the persisted daily table from scratch instead of appending the days it lacks.
+    refresh_persisted: bool = False
     # After creating AND assigning the policy, turn off the workspace's existing IP access lists
     # (the CBI policy replaces them). Gated by validate_disable_ip_acls so it can't leave the
     # workspace unprotected.
@@ -245,4 +274,29 @@ def validate_disable_ip_acls(disable: bool, create_policy: bool, auto_assign: bo
             "--disable-existing-ip-acls with --policy-mode dry_run would leave the workspace with no "
             "enforced ingress control (a dry-run policy is log-only). Use --policy-mode enforce, "
             "or drop --disable-existing-ip-acls."
+        )
+
+
+_UC_IDENT = r"(`[^`]+`|[A-Za-z_][A-Za-z0-9_-]*)"
+_UC_SCHEMA_RE = re.compile(rf"^{_UC_IDENT}\.{_UC_IDENT}$")
+
+
+def validate_uc_schema(uc_schema: str) -> None:
+    """--uc-schema must be a two-part `catalog.schema` name (plain or backtick-quoted parts). The tool
+    creates fixed-name tables inside it, so a bare catalog or a three-part table name is rejected."""
+    if not uc_schema:
+        return
+    if not _UC_SCHEMA_RE.match(uc_schema.strip()):
+        raise ValueError(
+            f"--uc-schema must be a two-part Unity Catalog name 'catalog.schema' (got {uc_schema!r}). "
+            f"The tool creates the tables {UC_DAILY_TABLE} and {UC_SUGGESTIONS_TABLE} inside it."
+        )
+
+
+def validate_limits(max_rules: int, max_cidrs: int) -> None:
+    """The hidden --max-rules / --max-cidrs overrides must be positive — a zero or negative cap would
+    drop every rule."""
+    if max_rules < 1 or max_cidrs < 1:
+        raise ValueError(
+            f"--max-rules and --max-cidrs must be positive integers (got {max_rules} / {max_cidrs})."
         )

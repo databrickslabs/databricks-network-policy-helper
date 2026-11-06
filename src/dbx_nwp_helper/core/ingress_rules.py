@@ -11,7 +11,13 @@ import ipaddress
 from collections import defaultdict
 from collections.abc import Callable
 
-from ..config import DEFAULT_NAME_PREFIX, MAX_DENY_CIDRS, MAX_POLICIES_PER_ACCOUNT, IngressConfig
+from ..config import (
+    CONSOLIDATED_RULE_LABEL,
+    DEFAULT_NAME_PREFIX,
+    MAX_DENY_CIDRS,
+    MAX_POLICIES_PER_ACCOUNT,
+    IngressConfig,
+)
 from . import limits, policy
 from .ingress import ALL_WORKSPACES, IngressAnalysis
 
@@ -148,6 +154,11 @@ def build_rules(
                 ),
                 "identity_type": "ALL_USERS",
                 "identities": [],
+                # Ranking + bookkeeping for consolidation / partner exclusion (core.limits).
+                "events": int(row.get("total_events") or 0),
+                "distinct_ips": int(row.get("distinct_ips") or len(ipv4_cidrs)),
+                "pinned": bool(row["databricks_owned"]),
+                "partner": bool(row.get("partners")),
             }
             if cfg.scope_identity and not row["databricks_owned"]:
                 resolved = []
@@ -206,9 +217,38 @@ def build_rules(
         target_specs[ALL_WORKSPACES] = []
 
     policies = {}
+    precap_specs: dict = {}
+    consolidation: dict = {}
+    summary: dict = {}
+    excluded_partner = 0
     for tgt in sorted(target_specs, key=str):
         label = "single policy" if tgt == ALL_WORKSPACES else f"workspace {tgt}"
-        allow, deny = limits.enforce_limits(list(target_specs[tgt]), list(deny_specs), label, _limit_warn)
+        allow = list(target_specs[tgt])
+        if cfg.exclude_partner_cidrs:
+            # The operator chose to add partner platforms via the console's managed source instead
+            # of pinning their CIDRs here — leave the partner-labelled rules out of the policy.
+            kept = [s for s in allow if not s.get("partner")]
+            excluded_partner += len(allow) - len(kept)
+            allow = kept
+        precap_specs[tgt] = (list(allow), list(deny_specs))
+        if cfg.consolidate_rules:
+            allow, folded = limits.consolidate(allow, deny_specs, max_rules=cfg.max_rules)
+            if folded["folded"]:
+                consolidation[tgt] = folded
+                note(
+                    f"[{label}] consolidated {folded['folded']} low-traffic allow rule(s) into "
+                    f"{folded['consolidated']} '{CONSOLIDATED_RULE_LABEL}' rule(s) carrying "
+                    f"{folded['cidrs']:,} CIDR(s); {folded['kept_named']} named rule(s) kept."
+                )
+        allow, deny = limits.enforce_limits(
+            allow,
+            list(deny_specs),
+            label,
+            _limit_warn,
+            max_rules=cfg.max_rules,
+            max_cidrs=cfg.max_cidrs,
+            summary=summary,
+        )
         policies[tgt] = {"allow": allow, "deny": deny}
 
     # When the public analysis produced no targets (no observed traffic, no IP ACLs) but we still
@@ -239,7 +279,37 @@ def build_rules(
     analysis.excluded_unresolved = excluded_unresolved
     analysis.skipped_ipv6 = skipped_ipv6
     analysis.truncations = truncations
+    analysis.truncation_summary = summary
+    analysis.consolidation = consolidation
+    analysis.precap_specs = precap_specs
+    analysis.excluded_partner = excluded_partner
     return policies
+
+
+def partner_cidr_count(analysis: IngressAnalysis) -> tuple[int, int]:
+    """(rules, cidrs) of partner-platform allow rules in the pre-cap specs — what excluding partner
+    CIDRs in favour of the console's managed source would free up."""
+    rules = cidrs = 0
+    for allow, _deny in analysis.precap_specs.values():
+        for s in allow:
+            if s.get("partner"):
+                rules += 1
+                cidrs += len(s.get("cidrs") or [])
+    return rules, cidrs
+
+
+def consolidation_preview(analysis: IngressAnalysis, cfg: IngressConfig) -> dict:
+    """What `consolidate` would do to the pre-cap specs (summed over targets) — shown in the prompt
+    that offers consolidation after a rule-cap truncation. Also reports how many CIDRs would still
+    exceed the CIDR cap afterwards ("cidrs_over")."""
+    total = {"folded": 0, "consolidated": 0, "kept_named": 0, "cidrs": 0, "cidrs_over": 0}
+    for allow, deny in analysis.precap_specs.values():
+        new_allow, folded = limits.consolidate(allow, deny, max_rules=cfg.max_rules)
+        for k in ("folded", "consolidated", "kept_named", "cidrs"):
+            total[k] += folded[k]
+        over = sum(len(s.get("cidrs") or []) for s in new_allow) - cfg.max_cidrs
+        total["cidrs_over"] += max(over, 0)
+    return total
 
 
 def _acl_ipv4(cidrs):
@@ -273,6 +343,7 @@ def _acl_specs(analysis: IngressAnalysis, cfg: IngressConfig):
                     "destination": "all_destinations",
                     "identity_type": "ALL_USERS",
                     "identities": [],
+                    "pinned": True,  # a migrated IP access list is never folded into a consolidated rule
                 }
             )
         elif a["list_type"] == "BLOCK":

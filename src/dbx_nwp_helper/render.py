@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 
 from . import console
-from .config import EgressConfig, IngressConfig
+from .config import MAX_CIDRS_PER_POLICY, MAX_INGRESS_RULES_PER_POLICY, EgressConfig, IngressConfig
 from .core import egress as egress_core
 from .core.egress import EgressAnalysis
 from .core.ingress import ALL_WORKSPACES, IngressAnalysis
@@ -42,6 +42,28 @@ def ingress_decisions(cfg: IngressConfig) -> None:
                 "Policy id (single scope) / prefix (per_workspace); blank = profile name.",
             ),
             ("deny_denied_ips", cfg.deny_denied_ips, "Deny source IPs recently seen blocked (403)."),
+            (
+                "consolidate_rules",
+                "prompt" if cfg.consolidate_rules is None else cfg.consolidate_rules,
+                "Fold low-traffic rules into 'Consolidated-Observed-IPs' when over the rule cap.",
+            ),
+            ("uc_schema", cfg.uc_schema, "Persist the analysis to catalog.schema (incremental re-runs)."),
+            *(
+                [("refresh_persisted", cfg.refresh_persisted, "Rebuild the persisted daily table.")]
+                if cfg.refresh_persisted
+                else []
+            ),
+            *(
+                [
+                    (
+                        "max_rules / max_cidrs",
+                        f"{cfg.max_rules} / {cfg.max_cidrs}",
+                        "Policy limits overridden for this account (non-default).",
+                    )
+                ]
+                if (cfg.max_rules, cfg.max_cidrs) != (MAX_INGRESS_RULES_PER_POLICY, MAX_CIDRS_PER_POLICY)
+                else []
+            ),
             (
                 "disable_existing_ip_acls",
                 cfg.disable_existing_ip_acls,

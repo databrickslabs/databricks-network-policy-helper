@@ -58,3 +58,8 @@ How to cut a release of `dbx-nwp-helper`. Versioning is **tag-driven** (via
   these fine. Relax the ceilings once the mirror approves the newer releases.
 - **CI needs tags.** The CI workflow checks out with `fetch-depth: 0` so `hatch-vcs` can see tags;
   keep that if you touch [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+- **Raised policy limits (hidden flags).** `ingress` accepts hidden `--max-rules` / `--max-cidrs`
+  options (env `DBX_NWP_MAX_RULES` / `DBX_NWP_MAX_CIDRS`) for accounts where Databricks has raised the
+  50-rule / 2,000-CIDR per-policy caps. They are deliberately absent from `--help` and the README:
+  share them one-to-one with a customer only once Databricks has confirmed the raised limit for their
+  account, since the API rejects a policy over the platform caps.

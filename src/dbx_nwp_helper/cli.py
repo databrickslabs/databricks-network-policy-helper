@@ -22,8 +22,11 @@ import typer
 
 from . import console, render
 from .config import (
+    CONSOLIDATED_RULE_LABEL,
     DEFAULT_ACCOUNT_HOST,
     DEFAULT_NAME_PREFIX,
+    MAX_CIDRS_PER_POLICY,
+    MAX_INGRESS_RULES_PER_POLICY,
     MAX_POLICY_ID_LEN,
     ApplyOptions,
     Connection,
@@ -32,7 +35,9 @@ from .config import (
     validate_apply,
     validate_disable_ip_acls,
     validate_export,
+    validate_limits,
     validate_policy_name,
+    validate_uc_schema,
 )
 
 app = typer.Typer(
@@ -1288,21 +1293,29 @@ def _interactive(yes: bool) -> bool:
     return not yes and sys.stdin.isatty()
 
 
-def _confirm_truncation(truncations: list[str], yes: bool, *, allow_reselect: bool = False) -> bool:
+def _confirm_truncation(
+    truncations: list[str], yes: bool, *, allow_reselect: bool = False, summary: dict | None = None
+) -> bool:
     """Decision point when rules / CIDRs / destinations were auto-capped to fit policy limits. The
-    per-item warnings already printed inline during build/preview; this forces the operator to
-    acknowledge that some rules were dropped before continuing to export/apply. Skipped by --yes and
-    non-interactively (scripted runs proceed → returns True). Returns True to continue. When
+    per-item warnings already printed inline during build/preview; this re-states them in a loud red
+    panel (with the structured `summary` counts when known) and forces the operator to acknowledge
+    that some rules were dropped before continuing to export/apply. The prompt is skipped by --yes and
+    non-interactively (scripted runs proceed → returns True) but the panel still prints. When
     `allow_reselect` is set, declining the prompt offers a second choice — go back to the selection
     step (returns False) or abort; without it (or if the user picks abort) the run stops cleanly
     (exit 0)."""
-    if not truncations or not _interactive(yes):
+    if not truncations:
+        return True
+    console.truncation_panel(truncations, summary)
+    if not _interactive(yes):
         return True
     n = len(truncations)
     if typer.confirm(
         typer.style(
-            f"⚠️  {n} truncation(s) were applied to fit policy limits (see warnings above). Continue?",
-            fg="yellow",
+            f"⚠️  {n} truncation(s) were applied to fit policy limits (see the panel above). Continue "
+            "with the TRIMMED policy?",
+            fg="red",
+            bold=True,
         ),
         default=False,
     ):
@@ -1324,6 +1337,97 @@ def _confirm_truncation(truncations: list[str], yes: bool, *, allow_reselect: bo
             return False
     console.banner("info", "Stopped — nothing further was done.")
     raise typer.Exit(code=0)
+
+
+def _recap_truncation(truncations: list[str], summary: dict | None, stage: str) -> None:
+    """Repeat the truncation panel (no prompt) right before an irreversible-looking step — the export
+    or the write — so a trimmed policy is never exported/applied with the warning scrolled away."""
+    if truncations:
+        console.truncation_panel(truncations, summary, stage=stage)
+
+
+def _offer_consolidation(analysis, cfg: IngressConfig, yes: bool) -> bool:
+    """After a policy-limit truncation, offer to fold the lowest-traffic allow rules into
+    'Consolidated-Observed-IPs' rule(s) so their IPs stay in the policy. Returns True when the caller
+    should rebuild with cfg.consolidate_rules=True. Only offered once (cfg.consolidate_rules is None
+    = undecided); --yes / non-interactive runs consolidate automatically — preserving IPs is the safer
+    default for a scripted run — unless --no-consolidate-rules was passed."""
+    from .core import ingress_rules as rules
+
+    if cfg.consolidate_rules is not None or not analysis.truncations:
+        return False
+    preview = rules.consolidation_preview(analysis, cfg)
+    if not preview["folded"]:
+        cfg.consolidate_rules = False  # nothing foldable (e.g. only the CIDR cap bit) — don't re-ask
+        return False
+    still_over = (
+        f" {preview['cidrs_over']:,} CIDR(s) would still exceed the {cfg.max_cidrs:,}-CIDR cap afterwards."
+        if preview["cidrs_over"]
+        else " Every observed IP then fits the policy."
+    )
+    msg = (
+        f"Consolidating would fold {preview['folded']} low-traffic allow rule(s) into "
+        f"{preview['consolidated']} '{CONSOLIDATED_RULE_LABEL}' rule(s) carrying "
+        f"{preview['cidrs']:,} CIDR(s), keeping {preview['kept_named']} named rule(s).{still_over}"
+    )
+    if not _interactive(yes):
+        console.banner(
+            "info", f"{msg} Consolidating automatically (--yes; pass --no-consolidate-rules to skip)."
+        )
+        cfg.consolidate_rules = True
+        return True
+    console.banner("info", msg)
+    cfg.consolidate_rules = bool(
+        typer.confirm(
+            typer.style(
+                "Consolidate the low-traffic rules instead of dropping them?", fg="yellow", bold=True
+            ),
+            default=True,
+        )
+    )
+    return cfg.consolidate_rules
+
+
+def _offer_partner_exclusion(analysis, cfg: IngressConfig, yes: bool) -> bool:
+    """When the CIDR cap still bites and partner-platform (Power BI / dbt / Tableau) ranges are in the
+    allow-list, offer to leave those CIDRs out and have the operator add the partners through the
+    console's managed 'Partner platforms' source instead (which Databricks keeps current and which
+    doesn't count against the CIDR cap). Interactive only — the scripted default keeps the CIDRs.
+    Returns True when the caller should rebuild with cfg.exclude_partner_cidrs=True."""
+    from .core import ingress_rules as rules
+
+    if cfg.exclude_partner_cidrs or not analysis.truncations or not _interactive(yes):
+        return False
+    if not any("CIDR" in m and "limit" in m for m in analysis.truncations):
+        return False
+    n_rules, n_cidrs = rules.partner_cidr_count(analysis)
+    if not n_cidrs:
+        return False
+    console.banner(
+        "info",
+        f"{n_cidrs:,} of the allow-listed CIDRs ({n_rules} rule(s)) are partner-platform ranges. Databricks "
+        "offers a managed 'Partner platforms' ingress source (account console → policy → Ingress; Beta, "
+        "AWS + GCP) that tracks those IPs for you and doesn't count against the CIDR cap.",
+    )
+    cfg.exclude_partner_cidrs = bool(
+        typer.confirm(
+            typer.style(
+                "Leave the partner CIDRs out of this policy (you'll add the partners via the console's "
+                "'Partner platforms' source) to free up room?",
+                fg="yellow",
+                bold=True,
+            ),
+            default=False,
+        )
+    )
+    if cfg.exclude_partner_cidrs:
+        console.banner(
+            "warn",
+            "Partner CIDRs excluded. REMEMBER: after creating the policy, add the partner platform(s) "
+            "as a 'Partner platforms' source on its Ingress tab in the account console — until then "
+            "those partners are not allow-listed.",
+        )
+    return cfg.exclude_partner_cidrs
 
 
 def _reconcile_ip_acls(analysis, cfg: IngressConfig, yes: bool) -> None:
@@ -1628,6 +1732,37 @@ def ingress(
         "access lists (enableIpAccessLists=false). Requires --create-policy, --auto-assign and "
         "--policy-mode enforce; ignored when the policy inherits dry_run from the existing CBI policy.",
     ),
+    consolidate_rules: bool | None = typer.Option(
+        None,
+        "--consolidate-rules/--no-consolidate-rules",
+        help="When the proposed allow rules exceed the per-policy rule cap, fold the lowest-traffic "
+        "owner groups into 'Consolidated-Observed-IPs' rule(s) so their IPs stay in the policy instead "
+        "of being dropped. Default: prompt when a cap is hit (interactive) / consolidate (--yes). "
+        "--no-consolidate-rules keeps today's drop-the-tail behaviour.",
+    ),
+    uc_schema: str = typer.Option(
+        "",
+        help="Persist the analysis to this Unity Catalog schema (catalog.schema): a per-day source-IP "
+        "aggregate table (dbx_nwp_ingress_daily) kept up to date incrementally — re-runs re-aggregate "
+        "it instead of re-scanning system.access.audit — plus a snapshot of each run's proposed rules "
+        "(dbx_nwp_ingress_suggestions). Needs CREATE TABLE / MODIFY on the schema.",
+    ),
+    refresh_persisted: bool = typer.Option(
+        False, help="With --uc-schema: rebuild the persisted daily table from scratch."
+    ),
+    max_rules: int = typer.Option(
+        MAX_INGRESS_RULES_PER_POLICY,
+        hidden=True,
+        envvar="DBX_NWP_MAX_RULES",
+        help="Per-policy ingress rule cap (allow + deny). Only for accounts where Databricks has "
+        "raised the platform limit.",
+    ),
+    max_cidrs: int = typer.Option(
+        MAX_CIDRS_PER_POLICY,
+        hidden=True,
+        envvar="DBX_NWP_MAX_CIDRS",
+        help="Per-policy CIDR cap. Only for accounts where Databricks has raised the platform limit.",
+    ),
     account_id: str | None = typer.Option(None, help="Databricks account_id (apply/identity)."),
     account_host: str | None = typer.Option(
         None, help="Account host. When unset, derived from the workspace's environment."
@@ -1675,6 +1810,11 @@ def ingress(
         deny_denied_ips=deny_denied_ips,
         select_rules=select_rules,
         disable_existing_ip_acls=disable_existing_ip_acls,
+        consolidate_rules=consolidate_rules,
+        uc_schema=uc_schema.strip(),
+        refresh_persisted=refresh_persisted,
+        max_rules=max_rules,
+        max_cidrs=max_cidrs,
         apply=ApplyOptions(
             create_policy=create_policy,
             policy_action=policy_action.value,
@@ -2101,12 +2241,25 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         )
         validate_policy_name(cfg.policy_name, cfg.policy_scope, cfg.apply.policy_action)
         validate_export(cfg.export, cfg.policy_scope)
+        validate_uc_schema(cfg.uc_schema)
+        validate_limits(cfg.max_rules, cfg.max_cidrs)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from None
+    if cfg.refresh_persisted and not cfg.uc_schema:
+        raise typer.BadParameter(
+            "--refresh-persisted only applies together with --uc-schema <catalog.schema>."
+        )
 
     console.title_panel(
         "Context-Based Ingress (CBI) Helper", "Propose a CBI allow-list from real audit-log source IPs."
     )
+    if (cfg.max_rules, cfg.max_cidrs) != (MAX_INGRESS_RULES_PER_POLICY, MAX_CIDRS_PER_POLICY):
+        console.banner(
+            "warn",
+            f"Policy limits overridden: {cfg.max_rules} rules / {cfg.max_cidrs:,} CIDRs per policy. Only "
+            "use this where Databricks has raised the limits for your account — the API rejects a "
+            "policy over the platform caps.",
+        )
     wc = _confirm_workspace(conn, yes)
     # Point account-level calls at the account console matching the workspace's environment and pick
     # a matching account-admin profile + account_id, so a staging / GCP / Azure workspace doesn't
@@ -2170,15 +2323,27 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
                     analysis, account, note=lambda m: console.banner("info", m)
                 )
 
-        policies = rules.build_rules(
-            analysis, cfg, identity_resolution, note=lambda m: console.banner("warn", m)
-        )
-        previews = rules.preview_blocks(policies, cfg, note=lambda m: console.banner("info", m))
-        render.ingress_preview(previews, cfg, analysis)
-        if previews:
-            console.responsibility_warning("source IP addresses / CIDRs")
-            _note_cross_workspace_compat(cfg)
-        if _confirm_truncation(analysis.truncations, yes, allow_reselect=True):
+        # Build → preview, re-building when the operator takes one of the limit-fitting offers
+        # (consolidate low-traffic rules; leave partner CIDRs to the console's managed source).
+        while True:
+            policies = rules.build_rules(
+                analysis, cfg, identity_resolution, note=lambda m: console.banner("warn", m)
+            )
+            previews = rules.preview_blocks(policies, cfg, note=lambda m: console.banner("info", m))
+            render.ingress_preview(previews, cfg, analysis)
+            if previews:
+                console.responsibility_warning("source IP addresses / CIDRs")
+                _note_cross_workspace_compat(cfg)
+            if _offer_consolidation(analysis, cfg, yes):
+                console.rule("Rebuilding with consolidated rules")
+                continue
+            if _offer_partner_exclusion(analysis, cfg, yes):
+                console.rule("Rebuilding without partner-platform CIDRs")
+                continue
+            break
+        if _confirm_truncation(
+            analysis.truncations, yes, allow_reselect=True, summary=analysis.truncation_summary
+        ):
             break
         # The user chose to go back: restore the full rule set and force the picker on for the retry.
         analysis.suggestions = suggestions_full.copy(deep=True)
@@ -2187,6 +2352,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
 
     if cfg.export:
         if previews:
+            _recap_truncation(analysis.truncations, analysis.truncation_summary, "before export")
             payload = rules.export_payload(
                 policies, cfg, conn.account_id or "", auth.this_workspace_id(conn), profile=conn.profile
             )
@@ -2195,6 +2361,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
             console.banner("warn", "Nothing to export — the analysis produced no ingress rules.")
 
     if not cfg.apply.create_policy:
+        _persist_suggestions(conn, http_path, analysis, cfg, policies, suggestion_rows_full, this_ws, False)
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
         return
     if not _has_rules(policies) and not (
@@ -2233,7 +2400,9 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     for target_id in rules.planned_policy_ids(policies, cfg, conn.profile, this_ws):
         _confirm_overwrite_policy(account, target_id, "ingress", yes)
 
+    _recap_truncation(analysis.truncations, analysis.truncation_summary, "before write")
     if not _confirm_write(cfg.policy_mode, yes):
+        _persist_suggestions(conn, http_path, analysis, cfg, policies, suggestion_rows_full, this_ws, False)
         console.banner("info", "Aborted — nothing written.")
         return
 
@@ -2249,6 +2418,57 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         )
     render.apply_results(results, conn.account_host, conn.account_id)
     _maybe_disable_ip_acls(cfg.disable_existing_ip_acls, results, wc)
+    _persist_suggestions(conn, http_path, analysis, cfg, policies, suggestion_rows_full, this_ws, True)
+
+
+def _persist_suggestions(
+    conn: Connection,
+    http_path: str,
+    analysis,
+    cfg: IngressConfig,
+    policies: dict,
+    suggestion_rows_full: list[dict],
+    workspace_id,
+    written: bool,
+) -> None:
+    """With --uc-schema, record this run's proposed rules and what became of each (kept / consolidated
+    / dropped / deselected / excluded) in dbx_nwp_ingress_suggestions. Best-effort: a failure here is
+    reported but never fails the run (the policy work is already done)."""
+    if not cfg.uc_schema:
+        return
+    from . import sql
+    from .core import ingress_rules as rules
+    from .core import persist
+
+    try:
+        src = persist.tables(cfg.uc_schema)
+        rows = persist.snapshot_rows(
+            analysis,
+            cfg,
+            policies,
+            suggestion_rows_full=suggestion_rows_full,
+            framing_col=rules._FRAMING_COL[cfg.policy_framing],
+            group_label=rules._group_label,
+        )
+        if not rows:
+            return
+        with console.status(f"Recording {len(rows)} proposed rule(s) in {src.suggestions_table}…"):
+            with sql.connection(conn, http_path) as sconn:
+                run_id = persist.write_suggestions(
+                    sconn,
+                    src,
+                    rows,
+                    cfg=cfg,
+                    workspace_id=workspace_id,
+                    policy_name=cfg.policy_name,
+                    written=written,
+                )
+        console.banner(
+            "success",
+            f"Recorded {len(rows)} proposed rule(s) for run {run_id} in {src.suggestions_table}.",
+        )
+    except Exception as e:  # noqa: BLE001 - persistence is a record, never a gate
+        console.banner("warn", f"Could not record the run's suggestions in {cfg.uc_schema}: {e}")
 
 
 def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
@@ -2324,6 +2544,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
 
     if cfg.export:
         if previews:
+            _recap_truncation(analysis.truncations, None, "before export")
             # this_ws is set for current_workspace (the only scope whose name uses it); None otherwise.
             payload = eg.export_payload(analysis, cfg, conn.account_id or "", this_ws, profile=conn.profile)
             _export_policy(cfg.export, payload, yes)
@@ -2360,6 +2581,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     for target_id in eg.planned_policy_ids(previews, cfg, conn.profile, apply_ws):
         _confirm_overwrite_policy(account, target_id, "egress", yes)
 
+    _recap_truncation(analysis.truncations, None, "before write")
     if not _confirm_write(cfg.policy_mode, yes):
         console.banner("info", "Aborted — nothing written.")
         return

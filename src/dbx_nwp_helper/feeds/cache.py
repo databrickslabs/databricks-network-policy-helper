@@ -89,10 +89,14 @@ def clear() -> list[str]:
 
 def status_rows() -> list[tuple[str, str, str]]:
     """(name, rows, age) for each cached feed — for `feeds list`."""
+    import pyarrow.parquet as pq
+
     rows = []
     for p in sorted(cache_dir().glob("*.parquet")):
         try:
-            n = len(pd.read_parquet(p, columns=[]))
+            # Row count from the parquet footer — `read_parquet(columns=[])` returns 0 rows for the
+            # index-less files written here, which made `feeds list` report every feed as empty.
+            n = pq.ParquetFile(p).metadata.num_rows
         except Exception:  # noqa: BLE001
             n = -1
         age_s = int(time.time() - p.stat().st_mtime)

@@ -32,6 +32,7 @@ from .config import (
     Connection,
     EgressConfig,
     IngressConfig,
+    validate_uc_schema,
 )
 
 _STYLE = questionary.Style(
@@ -126,6 +127,18 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
         "Add threat-intel deny rules for known-bad source IPs?", THREAT_DENY_RULES, default="off"
     )
     feeds = resolve_threat_ip_feeds(interactive=True, engaged=threat_deny != "off")
+    uc_schema = _text(
+        "Persist the analysis to a Unity Catalog schema for faster re-runs? "
+        "(catalog.schema — blank = don't persist)",
+        "",
+    ).strip()
+    while uc_schema:
+        try:
+            validate_uc_schema(uc_schema)
+            break
+        except ValueError as e:
+            console.banner("warn", str(e))
+            uc_schema = _text("Unity Catalog schema (catalog.schema — blank = don't persist)", "").strip()
 
     apply = _apply_wizard(conn, scope, other="egress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
@@ -155,6 +168,7 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
         policy_mode=mode,
         threat_deny_rules=threat_deny,
         disable_existing_ip_acls=disable_acls,
+        uc_schema=uc_schema,
         apply=apply,
     )
 

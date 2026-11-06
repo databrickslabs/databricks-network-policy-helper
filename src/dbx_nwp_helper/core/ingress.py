@@ -17,7 +17,7 @@ import pandas as pd
 
 from ..config import IngressConfig
 from ..feeds import loaders, rdap
-from . import enrich
+from . import enrich, persist
 
 ALL_WORKSPACES = "__ALL__"
 
@@ -58,6 +58,17 @@ class IngressAnalysis:
     # Truncation messages recorded when rules/CIDRs/identities were auto-capped to fit policy limits
     # (see build_rules / core.limits). Drives the CLI's truncation decision-point gate.
     truncations: list[str] = field(default_factory=list)
+    # Structured counts behind `truncations` (rules_dropped / cidrs_dropped / identities_dropped), for
+    # the CLI's truncation panel.
+    truncation_summary: dict = field(default_factory=dict)
+    # What build_rules folded when cfg.consolidate_rules was on: per-target
+    # {folded, consolidated, kept_named, cidrs, collapsed} (see core.limits.consolidate).
+    consolidation: dict = field(default_factory=dict)
+    # The per-target (allow, deny) spec lists as they stood BEFORE consolidation / capping, so the CLI
+    # can tell the operator what consolidating (or excluding partner CIDRs) would preserve.
+    precap_specs: dict = field(default_factory=dict)
+    # Partner-platform allow rules left out because cfg.exclude_partner_cidrs is on.
+    excluded_partner: int = 0
     # Populated only when the candidate set is empty: a one-row filter-funnel dict explaining where
     # the audit rows were dropped (see queries.candidate_funnel).
     funnel: dict | None = None
@@ -90,19 +101,40 @@ def analyze(
         else "INET SQL functions unavailable — using the portable IP query path (slower)."
     )
 
-    with _phase("Querying frequent public source IPs… (large audit logs can take a few minutes)"):
-        candidates = sql.query(
-            sql_conn,
-            queries.frequent_public_ips(
-                cfg.lookback_days,
-                cfg.min_events,
-                cfg.include_ipv6,
-                cfg.treat_null_status_as_success,
-                cfg.include_account_level,
-                only_workspace_id=only_ws,
-                use_inet=use_inet,
-            ),
-        )
+    # --uc-schema: maintain the persisted per-day aggregate (server-side, incremental) and read the
+    # candidate / denied views from it instead of re-scanning system.access.audit.
+    persisted = persist.tables(cfg.uc_schema) if cfg.uc_schema else None
+    if persisted is not None:
+        with _phase(f"Syncing the persisted daily table in {cfg.uc_schema}…"):
+            persist.ensure_tables(sql_conn, persisted)
+            persist.sync_daily(sql_conn, persisted, cfg, use_inet, on_step)
+        with _phase("Re-aggregating frequent public source IPs from the persisted daily table…"):
+            candidates = sql.query(
+                sql_conn,
+                queries.persisted_frequent_public_ips(
+                    persisted.daily_table,
+                    cfg.lookback_days,
+                    cfg.min_events,
+                    cfg.include_ipv6,
+                    cfg.treat_null_status_as_success,
+                    cfg.include_account_level,
+                    only_workspace_id=only_ws,
+                ),
+            )
+    else:
+        with _phase("Querying frequent public source IPs… (large audit logs can take a few minutes)"):
+            candidates = sql.query(
+                sql_conn,
+                queries.frequent_public_ips(
+                    cfg.lookback_days,
+                    cfg.min_events,
+                    cfg.include_ipv6,
+                    cfg.treat_null_status_as_success,
+                    cfg.include_account_level,
+                    only_workspace_id=only_ws,
+                    use_inet=use_inet,
+                ),
+            )
 
     # Also mine system.access.inbound_network for public IPs a *dry-run* CBI policy WOULD have denied
     # (policy_outcome=DRY_RUN_DENIAL): inbound clients the current log-only allow-list doesn't cover yet,
@@ -139,7 +171,14 @@ def analyze(
     with _phase("Reading the workspace IP access list + recently denied requests…"):
         ip_acls = _read_ip_acls(workspace_client)
         denied = sql.query(
-            sql_conn, queries.denied_requests(cfg.lookback_days, use_inet=use_inet, only_workspace_id=only_ws)
+            sql_conn,
+            (
+                queries.persisted_denied_requests(
+                    persisted.daily_table, cfg.lookback_days, only_workspace_id=only_ws
+                )
+                if persisted is not None
+                else queries.denied_requests(cfg.lookback_days, use_inet=use_inet, only_workspace_id=only_ws)
+            ),
         )
         # Also fold in CBI-policy denials (system.access.inbound_network), so the "recently denied"
         # view flags everything blocked inbound — IP-ACL 403s AND network-policy DENY/DENY_DRY_RUN —
@@ -345,10 +384,24 @@ def _rdap_lookups(ip_strs, workers: int, on_progress=None) -> dict:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     ips = list(dict.fromkeys(ip_strs))  # de-duped, order-preserving
-    total = len(ips)
     cache: dict[str, dict] = {}
     resolved_ranges: list[tuple] = []  # (ip_network, result) from prior answers' assigned blocks
     lock = threading.Lock()
+
+    # Seed from the on-disk cache (previous runs' answers, 30-day TTL): a direct hit skips the lookup,
+    # and every cached assigned block also covers its sibling IPs below.
+    disk = rdap.load_cached()
+    for res in disk.values():
+        for cidr in res.get("maximum_cidrs") or []:
+            try:
+                resolved_ranges.append((ipaddress.ip_network(cidr), res))
+            except ValueError:
+                pass
+    for ip in ips:
+        if ip in disk:
+            cache[ip] = disk[ip]
+    ips = [ip for ip in ips if ip not in cache]
+    total = len(ips)
 
     def _cached(ip_obj):
         for net, res in resolved_ranges:
@@ -378,20 +431,22 @@ def _rdap_lookups(ip_strs, workers: int, on_progress=None) -> dict:
                     pass
         return res
 
+    if total == 0:
+        return cache
     if workers <= 1 or total <= 1:
         for done, ip in enumerate(ips, 1):
             cache[ip] = _one(ip)
             if on_progress is not None:
                 on_progress(done, total, ip)
-        return cache
-
-    with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
-        futures = {pool.submit(_one, ip): ip for ip in ips}
-        for done, future in enumerate(as_completed(futures), 1):
-            ip = futures[future]
-            cache[ip] = future.result()
-            if on_progress is not None:
-                on_progress(done, total, ip)
+    else:
+        with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+            futures = {pool.submit(_one, ip): ip for ip in ips}
+            for done, future in enumerate(as_completed(futures), 1):
+                ip = futures[future]
+                cache[ip] = future.result()
+                if on_progress is not None:
+                    on_progress(done, total, ip)
+    rdap.store_cached({ip: cache[ip] for ip in ips})
     return cache
 
 

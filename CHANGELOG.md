@@ -13,6 +13,52 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-05
+
+Scale release for large environments (thousands of source IPs / hundreds of owner groups).
+
+### Added
+
+- **Rule consolidation instead of dropping (ingress).** When the proposed allow rules exceed the
+  per-policy **50-rule** cap, the run now **offers to consolidate**: the highest-traffic owner groups
+  keep their own labelled rules and the remainder are folded into **`Consolidated-Observed-IPs`**
+  rule(s) — one per destination/identity shape, adjacent CIDRs merged losslessly, Databricks-owned
+  and migrated-IP-ACL rules never folded, room reserved for deny rules. Every observed IP stays in the
+  policy unless the 2,000-CIDR cap itself is exceeded. Interactive runs are **prompted** (default
+  yes); `--yes` consolidates automatically; `--consolidate-rules` / `--no-consolidate-rules` decide up
+  front. (Previously a 276-owner environment silently kept 50 rules and dropped 226.)
+- **Partner-platform CIDR hand-off.** If the CIDR cap still bites after consolidation and the
+  allow-list contains partner-platform ranges (Power BI / dbt / Tableau), an interactive run offers to
+  leave those CIDRs out and reminds you to add the partners via the console's managed *Partner
+  platforms* source (console-only — the SDK and Terraform provider don't expose it). Default keeps
+  the CIDRs.
+- **`--uc-schema <catalog.schema>` — persist the ingress analysis to Unity Catalog.** Maintains
+  `dbx_nwp_ingress_daily`, a per-(day, workspace, source IP, outcome) aggregate of
+  `system.access.audit` built server-side and **updated incrementally** (only missing days plus the
+  two most recent are re-aggregated), and reads the candidate / denied views from it instead of
+  re-scanning the audit log. Also appends each run's proposed rules and their fate (`kept`,
+  `consolidated`, `dropped`, `deselected`, `excluded_*`) to `dbx_nwp_ingress_suggestions`.
+  `--refresh-persisted` rebuilds the daily table. The guided wizard asks for the schema too.
+- **On-disk RDAP cache.** Successful RDAP owner lookups are cached locally for 30 days
+  (`rdap_owners` in `feeds list` / cleared by `feeds clear`), so re-runs skip the slow, rate-limited
+  RIR calls for IPs — and whole assigned ranges — already resolved.
+- Hidden `--max-rules` / `--max-cidrs` overrides (also `DBX_NWP_MAX_RULES` / `DBX_NWP_MAX_CIDRS`) for
+  accounts where Databricks has raised the per-policy limits. Not shown in `--help`; a warning names
+  the overridden limits when used.
+
+### Changed
+
+- **Truncation warnings are now impossible to miss.** Any policy-limit truncation is shown in a bold
+  red panel (with rule / CIDR / identity drop counts and every itemised message) at the decision gate
+  — printed even under `--yes` — and **repeated right before `--export` and before the write** on
+  both `ingress` and `egress`, so a trimmed policy can't slip through with the warning scrolled away.
+- The ingress configuration panel shows `consolidate_rules`, `uc_schema` and any overridden limits.
+
+### Fixed
+
+- `feeds list` reported **0 rows** for every cached feed (it read the index-less parquet files with no
+  columns); it now reads the row count from the parquet footer.
+
 ## [0.9.0] - 2026-11-03
 
 ### Changed
@@ -353,7 +399,8 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/databrickslabs/databricks-network-policy-helper/compare/v0.7.0...v0.8.0

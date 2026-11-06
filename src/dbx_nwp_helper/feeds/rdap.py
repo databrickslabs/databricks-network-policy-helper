@@ -11,6 +11,7 @@ from http.client import RemoteDisconnected
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from . import cache
 from .http import FEED_USER_AGENT
 
 RDAP_TIMEOUT_SECONDS = 8
@@ -179,3 +180,88 @@ def lookup(ip_address: str) -> dict:
             if ref not in visited and ref not in pending:
                 pending.append(ref)
     return best if any(best.values()) else dict(_EMPTY)
+
+
+# ------------------------------------------------------------------------------ on-disk result cache
+# RDAP is the slow, rate-limited step for a large candidate set, and owners/assigned ranges change
+# rarely — so successful answers are kept in the local feed cache (same dir / `feeds list` / `feeds
+# clear` as the downloaded feeds) and reused for RDAP_CACHE_TTL_SECONDS. Failed / empty lookups are
+# never cached, so a throttled run retries them next time.
+RDAP_CACHE_NAME = "rdap_owners"
+RDAP_CACHE_TTL_SECONDS = 30 * 24 * 3600
+
+
+def _text_or_none(value):
+    """Parquet round-trips a missing string as NaN; the lookup contract is None."""
+    if value is None or isinstance(value, float):
+        return None
+    return str(value) or None
+
+
+def _cacheable(result: dict) -> bool:
+    return bool(result.get("rdap_owner_name") or result.get("maximum_cidrs"))
+
+
+def load_cached(ttl: int = RDAP_CACHE_TTL_SECONDS) -> dict[str, dict]:
+    """{ip: result} for every cached lookup younger than `ttl` seconds (empty when nothing cached)."""
+    df = cache.load(RDAP_CACHE_NAME)
+    if df is None or df.empty:
+        return {}
+    cutoff = time.time() - ttl
+    out: dict[str, dict] = {}
+    for rec in df.to_dict(orient="records"):
+        if float(rec.get("looked_up_at") or 0) < cutoff:
+            continue
+        cidrs = rec.get("maximum_cidrs")
+        if cidrs is not None and hasattr(cidrs, "tolist"):
+            cidrs = cidrs.tolist()
+        out[str(rec["ip"])] = {
+            "rdap_owner_name": _text_or_none(rec.get("rdap_owner_name")),
+            "rdap_type": _text_or_none(rec.get("rdap_type")),
+            "maximum_cidrs": list(cidrs) if cidrs is not None and len(cidrs) else None,
+        }
+    return out
+
+
+def store_cached(results: dict[str, dict], ttl: int = RDAP_CACHE_TTL_SECONDS) -> int:
+    """Merge `results` ({ip: result}) into the on-disk cache, dropping expired rows and anything
+    uncacheable. Existing rows keep their original timestamp so a re-write never extends their
+    lifetime. Returns the number of new rows written. Best-effort: a cache write failure never
+    affects the run."""
+    import pandas as pd
+
+    fresh = {ip: r for ip, r in results.items() if _cacheable(r)}
+    if not fresh:
+        return 0
+    try:
+        now = time.time()
+        cutoff = now - ttl
+        rows: dict[str, dict] = {}
+        existing = cache.load(RDAP_CACHE_NAME)
+        if existing is not None and not existing.empty:
+            for rec in existing.to_dict(orient="records"):
+                stamp = float(rec.get("looked_up_at") or 0)
+                if stamp < cutoff:
+                    continue
+                cidrs = rec.get("maximum_cidrs")
+                if cidrs is not None and hasattr(cidrs, "tolist"):
+                    cidrs = cidrs.tolist()
+                rows[str(rec["ip"])] = {
+                    "ip": str(rec["ip"]),
+                    "rdap_owner_name": _text_or_none(rec.get("rdap_owner_name")),
+                    "rdap_type": _text_or_none(rec.get("rdap_type")),
+                    "maximum_cidrs": list(cidrs or []),
+                    "looked_up_at": stamp,
+                }
+        for ip, r in fresh.items():
+            rows[ip] = {
+                "ip": ip,
+                "rdap_owner_name": r.get("rdap_owner_name"),
+                "rdap_type": r.get("rdap_type"),
+                "maximum_cidrs": list(r.get("maximum_cidrs") or []),
+                "looked_up_at": now,
+            }
+        cache.store(RDAP_CACHE_NAME, pd.DataFrame(list(rows.values())))
+        return len(fresh)
+    except Exception:  # noqa: BLE001 - cache is an optimisation only
+        return 0
