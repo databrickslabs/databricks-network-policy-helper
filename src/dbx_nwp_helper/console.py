@@ -241,3 +241,44 @@ def responsibility_warning(direction: str) -> None:
     console.print(
         Panel(body, title="[danger]Your responsibility[/danger]", border_style="danger", expand=False)
     )
+
+
+def truncation_panel(messages: list[str], summary: dict | None = None, *, stage: str = "") -> None:
+    """A loud, red panel listing every policy-limit truncation applied to the proposed policy — rules,
+    CIDRs or identities that were DROPPED to fit the caps. Shown at the truncation decision gate and
+    repeated right before an export / write, so a trimmed policy can't slip through unnoticed. `stage`
+    names where it's being shown (e.g. "before export")."""
+    if not messages:
+        return
+    summary = summary or {}
+    glyph = "⛔ " if UNICODE_GLYPHS else "[x] "
+    body = Text()
+    body.append(f"{glyph}POLICY LIMITS APPLIED — RULES / IPs WERE DROPPED", style="danger")
+    if stage:
+        body.append(f"  ({stage})", style="muted")
+    body.append("\n\n")
+    counts = []
+    if summary.get("rules_dropped"):
+        counts.append(f"{summary['rules_dropped']:,} rule(s) dropped")
+    if summary.get("cidrs_dropped"):
+        counts.append(f"{summary['cidrs_dropped']:,} CIDR(s) / IP(s) dropped")
+    if summary.get("identities_dropped"):
+        counts.append(f"{summary['identities_dropped']:,} identit(ies) dropped")
+    if counts:
+        body.append("  " + " · ".join(counts) + "\n\n", style="warn")
+    for m in messages:
+        body.append("  • ", style="danger")
+        body.append(f"{m}\n", style="value")
+    body.append(
+        "\nThe proposed policy does NOT cover the dropped entries. Traffic from dropped IPs will be "
+        "blocked under enforce mode.",
+        style="warn",
+    )
+    console.print(
+        Panel(
+            body,
+            title=f"[danger]{len(messages)} truncation(s) applied to fit policy limits[/danger]",
+            border_style="danger",
+            expand=False,
+        )
+    )

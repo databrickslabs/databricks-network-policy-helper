@@ -59,12 +59,14 @@ _IPV4_LONG_PORTABLE = f"""CASE WHEN {_IPV4_RLIKE} THEN
       END"""
 
 
-def _audit_recent(lookback_days: int, use_inet: bool) -> str:
-    """The base audit projection the notebook exposed as the `audit_recent` temp view, with
-    normalized_ip / ip_version derived either natively or portably. Portable mode additionally
-    projects ipv4_long (used by the integer-bounds private-range check)."""
+def _audit_projection(use_inet: bool, predicate: str, *, always_ipv4_long: bool = False) -> str:
+    """The base audit projection with normalized_ip / ip_version derived either natively or portably,
+    filtered by `predicate` (an event_date window). Portable mode additionally projects ipv4_long
+    (used by the integer-bounds private-range check); `always_ipv4_long` projects it in native mode
+    too (the persisted daily table stores it so reads never need the INET builtins)."""
     if use_inet:
-        normalized, version, ipv4_long_col = _NORMALIZED_IP_NATIVE, _IP_VERSION_NATIVE, ""
+        normalized, version = _NORMALIZED_IP_NATIVE, _IP_VERSION_NATIVE
+        ipv4_long_col = f"{_IPV4_LONG_PORTABLE} AS ipv4_long,\n      " if always_ipv4_long else ""
     else:
         normalized, version = _NORMALIZED_IP_PORTABLE, _IP_VERSION_PORTABLE
         ipv4_long_col = f"{_IPV4_LONG_PORTABLE} AS ipv4_long,\n      "
@@ -81,8 +83,14 @@ def _audit_recent(lookback_days: int, use_inet: bool) -> str:
       response.status_code AS status_code,
       session_id, request_id
     FROM system.access.audit
-    WHERE event_date >= current_date() - INTERVAL {lookback_days} DAYS
+    WHERE {predicate}
 """
+
+
+def _audit_recent(lookback_days: int, use_inet: bool) -> str:
+    """The base audit projection the notebook exposed as the `audit_recent` temp view, over the last
+    `lookback_days` days."""
+    return _audit_projection(use_inet, f"event_date >= current_date() - INTERVAL {lookback_days} DAYS")
 
 
 def audit_row_count(lookback_days: int, use_inet: bool = True) -> str:
@@ -387,4 +395,184 @@ def observed_egress(
     GROUP BY 1, 2
     HAVING COUNT(*) >= {min_events}
     ORDER BY events DESC
+    """
+
+
+# ------------------------------------------------------------------- persisted daily aggregate (UC)
+# `--uc-schema` maintains a per-(event_date, workspace, source IP, outcome) aggregate of the audit log
+# in a Unity Catalog table, so re-runs re-aggregate that (small) table instead of re-scanning
+# system.access.audit. The daily rows are parameter-agnostic: run-time filters (lookback, min events,
+# IPv6, null-status handling, workspace scope) are applied when reading them back, so one table serves
+# any combination of flags. See core/persist.py for the sync (watermark) logic.
+
+DAILY_OUTCOMES = ("success", "null_status", "denied")
+
+
+def daily_table_ddl(table: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+      event_date DATE COMMENT 'Audit event date (UTC)',
+      workspace_id STRING COMMENT 'Workspace the request targeted (0 = account level)',
+      public_ip STRING COMMENT 'Normalised source IP',
+      ip_version INT,
+      ipv4_long BIGINT COMMENT 'IPv4 as a 32-bit integer (NULL for IPv6) for private-range checks',
+      outcome STRING COMMENT 'success (status<400) | null_status | denied (403 / IpAccessDenied)',
+      events BIGINT,
+      sessions BIGINT COMMENT 'Distinct session ids that day',
+      principal_list ARRAY<STRING>,
+      principal_emails ARRAY<STRING>,
+      subject_names ARRAY<STRING>,
+      service_list ARRAY<STRING>,
+      action_list ARRAY<STRING>,
+      loaded_at TIMESTAMP COMMENT 'When dbx-nwp-helper wrote this row'
+    )
+    USING DELTA
+    COMMENT 'dbx-nwp-helper: per-day source-IP aggregate of system.access.audit (ingress analysis cache)'
+    """
+
+
+def daily_table_insert(table: str, start_date: str, end_date: str, use_inet: bool = True) -> str:
+    """Aggregate audit rows with event_date in [start_date, end_date] (ISO dates, inclusive) into the
+    daily table. Rows that are neither a success, a null-status, nor a denial (other 4xx/5xx) are not
+    kept — none of the analysis views use them."""
+    predicate = f"event_date BETWEEN DATE'{start_date}' AND DATE'{end_date}'"
+    return f"""
+    INSERT INTO {table}
+    WITH audit_recent AS ({_audit_projection(use_inet, predicate, always_ipv4_long=True)}),
+    classified AS (
+      SELECT *,
+        CASE
+          WHEN action_name = 'IpAccessDenied' OR status_code = 403 THEN 'denied'
+          WHEN status_code IS NULL THEN 'null_status'
+          WHEN status_code < 400 THEN 'success'
+        END AS outcome
+      FROM audit_recent
+      WHERE normalized_ip IS NOT NULL
+    )
+    SELECT event_date,
+      CAST(workspace_id AS STRING) AS workspace_id,
+      normalized_ip AS public_ip,
+      ANY_VALUE(ip_version) AS ip_version,
+      ANY_VALUE(ipv4_long) AS ipv4_long,
+      outcome,
+      COUNT(*) AS events,
+      COUNT(DISTINCT session_id) AS sessions,
+      sort_array(collect_set(principal)) AS principal_list,
+      sort_array(collect_set(principal_email)) AS principal_emails,
+      sort_array(collect_set(subject_name)) AS subject_names,
+      sort_array(collect_set(service_name)) AS service_list,
+      sort_array(collect_set(action_name)) AS action_list,
+      current_timestamp() AS loaded_at
+    FROM classified
+    WHERE outcome IS NOT NULL
+    GROUP BY event_date, CAST(workspace_id AS STRING), normalized_ip, outcome
+    """
+
+
+def daily_table_bounds(table: str) -> str:
+    return f"SELECT MIN(event_date) AS lo, MAX(event_date) AS hi, COUNT(*) AS rows FROM {table}"
+
+
+def daily_table_delete_from(table: str, start_date: str) -> str:
+    return f"DELETE FROM {table} WHERE event_date >= DATE'{start_date}'"
+
+
+def server_today() -> str:
+    return "SELECT current_date() AS today"
+
+
+def _flat_distinct(col: str) -> str:
+    return f"sort_array(array_distinct(flatten(collect_list({col}))))"
+
+
+def persisted_frequent_public_ips(
+    table: str,
+    lookback_days: int,
+    min_events: int,
+    include_ipv6: bool,
+    treat_null_status_as_success: bool,
+    include_account_level: bool,
+    only_workspace_id: int | None = None,
+) -> str:
+    """`frequent_public_ips` re-aggregated from the persisted daily table — same output columns, so
+    the enrichment pipeline is unchanged. Private IPv4 ranges are excluded via the stored ipv4_long
+    (the portable check), so this never needs the INET builtins."""
+    ipv6_predicate = "OR ip_version = 6" if include_ipv6 else ""
+    outcomes = "'success', 'null_status'" if treat_null_status_as_success else "'success'"
+    if only_workspace_id is not None:
+        account_level_predicate = f"AND workspace_id = '{int(only_workspace_id)}'"
+    elif include_account_level:
+        account_level_predicate = ""
+    else:
+        account_level_predicate = "AND workspace_id <> '0'"
+    return f"""
+    WITH daily AS (
+      SELECT * FROM {table}
+      WHERE event_date >= current_date() - INTERVAL {lookback_days} DAYS
+        AND outcome IN ({outcomes})
+        AND (ip_version = 4 {ipv6_predicate})
+        {account_level_predicate}
+        AND {_not_private(False).replace("normalized_ip", "public_ip")}
+    )
+    SELECT public_ip,
+      ANY_VALUE(ip_version) AS ip_version,
+      SUM(events) AS events,
+      size({_flat_distinct("principal_list")}) AS principals,
+      size({_flat_distinct("service_list")}) AS services,
+      size({_flat_distinct("action_list")}) AS actions,
+      COUNT(DISTINCT event_date) AS active_days,
+      SUM(sessions) AS sessions,
+      MIN(event_date) AS first_active_date, MAX(event_date) AS last_active_date,
+      {_flat_distinct("principal_list")} AS principal_list,
+      {_flat_distinct("principal_emails")} AS principal_emails,
+      {_flat_distinct("subject_names")} AS subject_names,
+      {_flat_distinct("service_list")} AS service_list,
+      sort_array(collect_set(workspace_id)) AS workspace_ids
+    FROM daily
+    GROUP BY public_ip
+    HAVING SUM(events) >= {min_events}
+    ORDER BY events DESC, principals DESC
+    """
+
+
+def persisted_denied_requests(table: str, lookback_days: int, only_workspace_id: int | None = None) -> str:
+    """`denied_requests` re-aggregated from the persisted daily table (outcome = 'denied')."""
+    ws = f"AND workspace_id = '{int(only_workspace_id)}'" if only_workspace_id is not None else ""
+    return f"""
+    SELECT public_ip AS source_ip,
+      SUM(events) AS denied_events,
+      size({_flat_distinct("principal_list")}) AS principals,
+      {_flat_distinct("principal_list")} AS principal_list,
+      MIN(event_date) AS first_denied, MAX(event_date) AS last_denied
+    FROM {table}
+    WHERE event_date >= current_date() - INTERVAL {lookback_days} DAYS
+      AND outcome = 'denied'
+      {ws}
+    GROUP BY public_ip
+    ORDER BY denied_events DESC
+    """
+
+
+def suggestions_table_ddl(table: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+      run_id STRING COMMENT 'One id per dbx-nwp-helper ingress run',
+      run_at TIMESTAMP,
+      workspace_id STRING COMMENT 'Workspace the run analysed',
+      policy_name STRING,
+      policy_mode STRING,
+      policy_framing STRING,
+      policy_target STRING COMMENT '__ALL__ for single-policy scopes, else the per-workspace target',
+      rule_label STRING,
+      rdap_owner STRING,
+      recommendation STRING,
+      distinct_ips INT,
+      total_events BIGINT,
+      cidrs ARRAY<STRING>,
+      status STRING COMMENT 'kept | consolidated | dropped | deselected | excluded_*',
+      consolidated_into STRING COMMENT 'Label of the consolidated rule when status = consolidated',
+      written BOOLEAN COMMENT 'Whether this run wrote the policy (--create-policy)'
+    )
+    USING DELTA
+    COMMENT 'dbx-nwp-helper: proposed ingress rules per run'
     """

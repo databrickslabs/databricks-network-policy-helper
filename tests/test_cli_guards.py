@@ -1915,3 +1915,175 @@ def test_guided_confirm_requires_explicit_enter(monkeypatch):
     monkeypatch.setattr(guided.questionary, "confirm", fake_confirm)
     assert guided._confirm("ok?", default=True) is True
     assert captured.get("auto_enter") is False
+
+
+# ------------------------------------------------------------------ consolidation / partner prompts
+def _capped_analysis(n=120, partner=False):
+    """An analysis whose build exceeds the 50-rule cap (n owner groups), optionally with a partner
+    group, already built once with consolidation undecided."""
+    from dbx_nwp_helper.config import IngressConfig
+    from dbx_nwp_helper.core import ingress_rules as rules
+
+    def row(owner, cidr, events, **kw):
+        base = {
+            "policy_target": "__ALL__",
+            "rdap_owner": owner,
+            "distinct_ips": 1,
+            "total_events": events,
+            "principals": [],
+            "principal_emails": [],
+            "subject_names": [],
+            "scoped_destination": "all_destinations",
+            "minimal_cidrs": [cidr],
+            "optimal_cidrs": [cidr],
+            "maximum_cidrs": None,
+            "threat_feeds": None,
+            "cloud_provider": None,
+            "databricks_owned": None,
+            "partners": None,
+            "recommendation": "REVIEW",
+        }
+        base.update(kw)
+        return base
+
+    rows = [row(f"Owner {i}", f"10.{i // 256}.{i % 256}.1/32", n - i) for i in range(n)]
+    if partner:
+        rows.append(row("Power BI", "20.0.0.1/32", 1, partners=["Power BI"]))
+    analysis = IngressAnalysis(
+        candidates=pd.DataFrame(),
+        suggestions=pd.DataFrame(rows),
+        threat_matches=pd.DataFrame(),
+        denied_requests=pd.DataFrame(columns=["source_ip"]),
+        ip_acls=[],
+        suggestion_rows=rows,
+    )
+    cfg = IngressConfig()
+    rules.build_rules(analysis, cfg)
+    assert analysis.truncations
+    return analysis, cfg
+
+
+def test_offer_consolidation_interactive_accept(monkeypatch, capsys):
+    analysis, cfg = _capped_analysis()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    asked = []
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: asked.append(k.get("default")) or True)
+    assert cli._offer_consolidation(analysis, cfg, yes=False) is True
+    assert cfg.consolidate_rules is True and asked == [True]  # default answer is yes
+    out = _plain(capsys.readouterr().out)
+    assert "fold 71 low-traffic allow rule(s)" in out and "Consolidated-Observed-IPs" in out
+    assert "Every observed IP then fits" in out
+
+
+def test_offer_consolidation_interactive_decline(monkeypatch):
+    analysis, cfg = _capped_analysis()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    assert cli._offer_consolidation(analysis, cfg, yes=False) is False
+    assert cfg.consolidate_rules is False  # decided: not asked again
+
+
+def test_offer_consolidation_yes_auto_consolidates(monkeypatch, capsys):
+    analysis, cfg = _capped_analysis()
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt")))
+    assert cli._offer_consolidation(analysis, cfg, yes=True) is True
+    assert cfg.consolidate_rules is True
+    assert "Consolidating automatically" in _plain(capsys.readouterr().out)
+
+
+def test_offer_consolidation_respects_explicit_flag(monkeypatch):
+    analysis, cfg = _capped_analysis()
+    cfg.consolidate_rules = False  # --no-consolidate-rules
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt")))
+    assert cli._offer_consolidation(analysis, cfg, yes=False) is False
+
+
+def test_offer_consolidation_noop_without_truncation():
+    from dbx_nwp_helper.config import IngressConfig
+
+    analysis, _ = _capped_analysis()
+    analysis.truncations = []
+    cfg = IngressConfig()
+    assert cli._offer_consolidation(analysis, cfg, yes=True) is False and cfg.consolidate_rules is None
+
+
+def test_offer_partner_exclusion_only_when_a_limit_was_hit(monkeypatch):
+    analysis, cfg = _capped_analysis(partner=True)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt")))
+    assert cli._offer_partner_exclusion(analysis, cfg, yes=False, limits_hit=False) is False
+
+
+def test_offer_partner_exclusion_offered_on_rule_cap_too(monkeypatch, capsys):
+    # The rule cap (not just the CIDR cap) triggers the hand-off — the partner rule stays named
+    # (pinned) through consolidation, and the operator may prefer the console's managed source.
+    analysis, cfg = _capped_analysis(partner=True)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    assert cli._offer_partner_exclusion(analysis, cfg, yes=False, limits_hit=True) is True
+    assert cfg.exclude_partner_cidrs is True
+    out = " ".join(_plain(capsys.readouterr().out).split())  # collapse Rich's terminal wrapping
+    assert "close to hitting context-based ingress policy limits" in out
+    assert "1 allow rule(s) / 1 CIDR(s) are partner-platform ranges" in out
+    assert "REMEMBER" in out and "Partner platforms" in out
+
+
+def test_offer_partner_exclusion_skipped_under_yes(monkeypatch):
+    analysis, cfg = _capped_analysis(partner=True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt")))
+    assert cli._offer_partner_exclusion(analysis, cfg, yes=True, limits_hit=True) is False
+    assert cfg.exclude_partner_cidrs is False  # scripted default keeps the CIDRs
+
+
+def test_offer_partner_exclusion_noop_without_partners(monkeypatch):
+    analysis, cfg = _capped_analysis(partner=False)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt")))
+    assert cli._offer_partner_exclusion(analysis, cfg, yes=False, limits_hit=True) is False
+
+
+def test_confirm_truncation_prints_panel_even_under_yes(capsys):
+    cli._confirm_truncation(["capped 60 rules -> 50"], yes=True, summary={"rules_dropped": 10})
+    out = _plain(capsys.readouterr().out)
+    assert "POLICY LIMITS APPLIED" in out and "10 rule(s) dropped" in out and "capped 60 rules" in out
+
+
+def test_recap_truncation_names_stage(capsys):
+    cli._recap_truncation(["x"], {"cidrs_dropped": 5}, "before write")
+    out = _plain(capsys.readouterr().out)
+    assert "(before write)" in out and "5 CIDR(s) / IP(s) dropped" in out
+    cli._recap_truncation([], None, "before write")
+    assert capsys.readouterr().out == ""
+
+
+# ------------------------------------------------------------------ new ingress flags
+def test_ingress_rejects_bad_uc_schema():
+    r = runner.invoke(cli.app, ["ingress", "--profile", "p", "--uc-schema", "just_a_catalog", "--yes"])
+    assert r.exit_code != 0
+    assert "catalog.schema" in _plain(r.output)
+
+
+def test_ingress_rejects_refresh_persisted_without_schema():
+    r = runner.invoke(cli.app, ["ingress", "--profile", "p", "--refresh-persisted", "--yes"])
+    assert r.exit_code != 0
+    assert "--refresh-persisted only applies together with --uc-schema" in _plain(r.output)
+
+
+def test_ingress_hidden_limit_flags_validated_and_hidden(monkeypatch):
+    r = runner.invoke(cli.app, ["ingress", "--profile", "p", "--max-cidrs", "0", "--yes"])
+    assert r.exit_code != 0 and "must be positive" in _plain(r.output)
+    monkeypatch.setenv("COLUMNS", "200")  # wide enough that Rich doesn't elide option names
+    help_out = _plain(runner.invoke(cli.app, ["ingress", "--help"]).output)
+    assert "--max-cidrs" not in help_out and "--max-rules" not in help_out
+    assert "--consolidate-rules" in help_out and "--uc-schema" in help_out
+
+
+def test_ingress_limit_env_vars_reach_config(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(cli, "_run_ingress", lambda cfg, conn, yes: captured.update(cfg=cfg))
+    monkeypatch.setenv("DBX_NWP_MAX_CIDRS", "5000")
+    monkeypatch.setenv("DBX_NWP_MAX_RULES", "80")
+    r = runner.invoke(cli.app, ["ingress", "--profile", "p", "--yes", "--no-consolidate-rules"])
+    assert r.exit_code == 0, r.output
+    cfg = captured["cfg"]
+    assert (cfg.max_rules, cfg.max_cidrs) == (80, 5000) and cfg.consolidate_rules is False

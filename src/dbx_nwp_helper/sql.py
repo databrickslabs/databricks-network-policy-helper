@@ -146,6 +146,12 @@ def query(c: dbsql.client.Connection, sql_text: str) -> pd.DataFrame:
         return cur.fetchall_arrow().to_pandas()
 
 
+def execute(c: dbsql.client.Connection, sql_text: str) -> None:
+    """Run a statement for its side effect (DDL / INSERT / DELETE) and discard any result."""
+    with c.cursor() as cur:
+        cur.execute(sql_text)
+
+
 def warehouse_is_serverless(wh) -> bool:
     """Best-effort check used only for display."""
     return getattr(wh, "warehouse_type", None) in (

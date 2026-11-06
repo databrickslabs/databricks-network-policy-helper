@@ -174,6 +174,29 @@ the egress helper already created (and vice-versa) for a combined policy.
 The CLI knows the Databricks network-policy limits and **warns + auto-caps** to keep proposals
 valid: **50 ingress rules, 2000 CIDR blocks, 100 identities per policy; 1000 policies per account.**
 
+**Large environments — consolidation, not truncation.** Every RDAP owner is its own rule, so hundreds
+of owners hit the 50-rule cap first. When that happens the run **offers to consolidate**: the
+highest-traffic owners keep named rules and the rest fold into **`Consolidated-Observed-IPs`** rule(s)
+(one per destination/identity shape; Databricks-owned, partner-platform + migrated-ACL rules are never
+folded; adjacent CIDRs merged losslessly). IPs are only lost if the **2,000-CIDR** cap is also
+exceeded. Whenever a cap is hit, an interactive run also offers to drop the **partner-platform** rules
+in favour of the console's managed *Partner platforms* source (remind the user to add the partner
+there afterwards). Interactive = prompt (default
+yes); `--yes` = consolidate; `--consolidate-rules` / `--no-consolidate-rules` decide up front. Any
+truncation that still happens is shown in a **red panel** at the gate and again before the write.
+
+**`--uc-schema <catalog.schema>` — persist to Unity Catalog.** For slow audit scans, pass a schema the
+user can `CREATE TABLE` in: the tool keeps `dbx_nwp_ingress_daily` (per-day source-IP aggregate,
+built server-side, **incremental** — only missing days + the two newest are re-aggregated) and reads
+candidates from it instead of `system.access.audit`; every run also appends its proposed rules and
+their fate (`kept` / `consolidated` / `dropped` / `deselected` / `excluded_*`) to
+`dbx_nwp_ingress_suggestions`. `--refresh-persisted` rebuilds the daily table. RDAP answers are also
+cached on disk for 30 days (`rdap_owners` in `feeds list`).
+
+Hidden, undocumented-in-`--help` overrides `--max-rules` / `--max-cidrs` (env `DBX_NWP_MAX_RULES` /
+`DBX_NWP_MAX_CIDRS`) exist for accounts where Databricks has **raised** the limits. Only use them when
+the user confirms Databricks has done so — the API rejects a policy over the platform caps.
+
 ## Existing IP access lists & denied requests
 
 Existing IP access lists are **auto-detected** (there is no `--ip-acl-handling` flag). When the
