@@ -274,8 +274,8 @@ uv run dbx-nwp-helper --help</pre>
 
   <h2 id="walkthrough">An ingress run, step by step</h2>
   <p>This is what happens on a typical <code class="inline">ingress</code> run. The tool pauses between sections so you review each one; answering <em>no</em> aborts cleanly, writing nothing. (<code class="inline">--yes</code> skips the pauses for scripting.)</p>
-  <figure class="flow reveal" role="img" aria-label="Ingress run flow: confirm the target workspace, analyse audit traffic and enrich it, detect front-end PrivateLink and the existing CBI policy, build rules per dimension (public from traffic, private from a PrivateLink PAS, carrying any other existing blocks forward), preview the policy, then a gated create — only with --create-policy and passing pre-checks does it write the policy (dry-run first) and assign it; otherwise it proposes only or aborts, writing nothing.">
-    <svg viewBox="0 0 600 732" xmlns="http://www.w3.org/2000/svg">
+  <figure class="flow reveal" role="img" aria-label="Ingress run flow: confirm the target workspace, analyse audit traffic (or the persisted daily table) and enrich it, detect front-end PrivateLink and the existing CBI policy, build rules per dimension (public from traffic, private from a PrivateLink PAS, carrying any other existing blocks forward), preview the policy; if it exceeds the policy limits, offer to consolidate low-traffic rules and re-preview; then a gated create — only with --create-policy and passing pre-checks does it write the policy (dry-run first) and assign it; otherwise it proposes only or aborts, writing nothing.">
+    <svg viewBox="0 0 600 804" xmlns="http://www.w3.org/2000/svg">
       <defs><marker id="ah-ig" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" class="arrow"/></marker></defs>
       <path class="edge" marker-end="url(#ah-ig)" d="M175,58 L175,80"/>
       <path class="edge" marker-end="url(#ah-ig)" d="M175,130 L175,152"/>
@@ -286,26 +286,33 @@ uv run dbx-nwp-helper --help</pre>
       <path class="edge" marker-end="url(#ah-ig)" d="M175,490 L175,512"/>
       <path class="edge" marker-end="url(#ah-ig)" d="M175,562 L175,584"/>
       <path class="edge" marker-end="url(#ah-ig)" d="M175,634 L175,656"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M175,706 L175,728"/>
       <path class="edge" marker-end="url(#ah-ig)" d="M290,395 L336,395"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M460,372 L460,323 L296,323"/>
       <path class="edge" marker-end="url(#ah-ig)" d="M290,467 L336,467"/>
-      <text class="elabel" x="182" y="435">yes</text>
-      <text class="elabel" x="182" y="507">pass</text>
-      <text class="elabel" x="300" y="388">no</text>
+      <path class="edge" marker-end="url(#ah-ig)" d="M290,539 L336,539"/>
+      <text class="elabel" x="182" y="435">fits</text>
+      <text class="elabel" x="182" y="507">yes</text>
+      <text class="elabel" x="182" y="579">pass</text>
+      <text class="elabel" x="300" y="388">over</text>
       <text class="elabel" x="300" y="460">no</text>
+      <text class="elabel" x="300" y="532">no</text>
       <g class="node n-decision"><rect x="60" y="12" width="230" height="46" rx="12"/><text x="175" y="35" text-anchor="middle" dominant-baseline="central">Confirm target workspace</text></g>
-      <g class="node n-process"><rect x="60" y="84" width="230" height="46" rx="10"/><text x="175" y="107" text-anchor="middle" dominant-baseline="central">Analyse audit + enrich</text></g>
+      <g class="node n-process"><rect x="60" y="84" width="230" height="46" rx="10"/><text x="175" y="101" text-anchor="middle"><tspan x="175">Analyse audit + enrich</tspan><tspan x="175" dy="16">(or the persisted daily table)</tspan></text></g>
       <g class="node n-process"><rect x="60" y="156" width="230" height="46" rx="10"/><text x="175" y="173" text-anchor="middle"><tspan x="175">Detect PrivateLink</tspan><tspan x="175" dy="16">&amp; existing CBI</tspan></text></g>
       <g class="node n-process"><rect x="60" y="228" width="230" height="46" rx="10"/><text x="175" y="245" text-anchor="middle"><tspan x="175">Build rules — public + private,</tspan><tspan x="175" dy="16">carry others forward</tspan></text></g>
       <g class="node n-process"><rect x="60" y="300" width="230" height="46" rx="10"/><text x="175" y="323" text-anchor="middle" dominant-baseline="central">Preview proposed policy</text></g>
-      <g class="node n-decision"><rect x="60" y="372" width="230" height="46" rx="12"/><text x="175" y="395" text-anchor="middle" dominant-baseline="central">--create-policy ?</text></g>
-      <g class="node n-decision"><rect x="60" y="444" width="230" height="46" rx="12"/><text x="175" y="467" text-anchor="middle" dominant-baseline="central">Pre-checks pass ?</text></g>
-      <g class="node n-write"><rect x="60" y="516" width="230" height="46" rx="10"/><text x="175" y="539" text-anchor="middle" dominant-baseline="central">Write policy — dry-run first</text></g>
-      <g class="node n-process"><rect x="60" y="588" width="230" height="46" rx="10"/><text x="175" y="611" text-anchor="middle" dominant-baseline="central">Assign to workspace</text></g>
-      <g class="node n-done"><rect x="60" y="660" width="230" height="46" rx="10"/><text x="175" y="683" text-anchor="middle" dominant-baseline="central">Done</text></g>
-      <g class="node n-done"><rect x="340" y="372" width="240" height="46" rx="10"/><text x="460" y="389" text-anchor="middle"><tspan x="460">Propose-only —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
-      <g class="node n-abort"><rect x="340" y="444" width="240" height="46" rx="10"/><text x="460" y="461" text-anchor="middle"><tspan x="460">Abort —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
+      <g class="node n-decision"><rect x="60" y="372" width="230" height="46" rx="12"/><text x="175" y="395" text-anchor="middle" dominant-baseline="central">Over the policy limits ?</text></g>
+      <g class="node n-decision"><rect x="60" y="444" width="230" height="46" rx="12"/><text x="175" y="467" text-anchor="middle" dominant-baseline="central">--create-policy ?</text></g>
+      <g class="node n-decision"><rect x="60" y="516" width="230" height="46" rx="12"/><text x="175" y="539" text-anchor="middle" dominant-baseline="central">Pre-checks pass ?</text></g>
+      <g class="node n-write"><rect x="60" y="588" width="230" height="46" rx="10"/><text x="175" y="611" text-anchor="middle" dominant-baseline="central">Write policy — dry-run first</text></g>
+      <g class="node n-process"><rect x="60" y="660" width="230" height="46" rx="10"/><text x="175" y="683" text-anchor="middle" dominant-baseline="central">Assign to workspace</text></g>
+      <g class="node n-done"><rect x="60" y="732" width="230" height="46" rx="10"/><text x="175" y="755" text-anchor="middle" dominant-baseline="central">Done</text></g>
+      <g class="node n-process"><rect x="340" y="372" width="240" height="46" rx="10"/><text x="460" y="389" text-anchor="middle"><tspan x="460">Offer: consolidate low-traffic</tspan><tspan x="460" dy="16">rules → rebuild &amp; re-preview</tspan></text></g>
+      <g class="node n-done"><rect x="340" y="444" width="240" height="46" rx="10"/><text x="460" y="461" text-anchor="middle"><tspan x="460">Propose-only —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
+      <g class="node n-abort"><rect x="340" y="516" width="240" height="46" rx="10"/><text x="460" y="533" text-anchor="middle"><tspan x="460">Abort —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
     </svg>
-    <figcaption>The ingress run at a glance — nothing is written until you pass <code class="inline">--create-policy</code> <em>and</em> clear the pre-checks. Each step is detailed below.</figcaption>
+    <figcaption>The ingress run at a glance — nothing is written until you pass <code class="inline">--create-policy</code> <em>and</em> clear the pre-checks. A policy over the 50-rule cap is offered consolidation rather than silently trimmed. Each step is detailed below.</figcaption>
   </figure>
   <ol class="steps">
     <li id="ig-workspace">
@@ -322,11 +329,12 @@ uv run dbx-nwp-helper --help</pre>
     </li>
     <li id="ig-analyse">
       <h3>Analyse audit traffic &amp; enrich</h3>
-      <p>It finds the public source IPs that successfully connected (from <code class="inline">system.access.audit</code>), then enriches them with open threat-intel feeds, cloud-provider, Databricks-owned and <strong>partner-platform</strong> IP ranges, and (optionally) RDAP ownership lookups. It also folds in the public IPs a <em>dry-run</em> CBI policy would have denied (from <code class="inline">system.access.inbound_network</code>) as extra allow-list candidates. This is the slow part — it shows live progress.</p>
+      <p>It finds the public source IPs that successfully connected (from <code class="inline">system.access.audit</code>), then enriches them with open threat-intel feeds, cloud-provider, Databricks-owned and <strong>partner-platform</strong> IP ranges, and (optionally) RDAP ownership lookups. It also folds in the public IPs a <em>dry-run</em> CBI policy would have denied (from <code class="inline">system.access.inbound_network</code>) as extra allow-list candidates. This is the slow part — it shows live progress. For a large audit log, <code class="inline">--uc-schema catalog.schema</code> persists a per-day aggregate in Unity Catalog so re-runs don't re-scan the audit table, and RDAP answers are cached on disk for 30 days.</p>
+      <details><summary>Learn more — persisting the analysis to Unity Catalog</summary><div class="body">With <code class="inline">--uc-schema catalog.schema</code> the tool keeps <code class="inline">dbx_nwp_ingress_daily</code> — one row per (day, workspace, source IP, outcome) with event counts and the principals / services seen — in your schema. It is built <em>server-side</em> (<code class="inline">INSERT … SELECT</code> from the audit table; nothing streams through your laptop) and updated <strong>incrementally</strong>: each run aggregates only the days the table lacks, plus the two most recent days (audit rows can arrive late). Candidates and denials are then re-aggregated from that table, so lookback, minimum events, IPv6, null-status and workspace scope still apply per run without another audit scan. Each run also appends its proposed rules and what became of each (<code class="inline">kept</code>, <code class="inline">consolidated</code>, <code class="inline">dropped</code>, <code class="inline">deselected</code>, <code class="inline">excluded_*</code>) to <code class="inline">dbx_nwp_ingress_suggestions</code>, so the findings outlive the terminal. You need <code class="inline">CREATE TABLE</code> / <code class="inline">MODIFY</code> on the schema; <code class="inline">--refresh-persisted</code> rebuilds the daily table from scratch.</div></details>
       <details><summary>Learn more — what is RDAP?</summary><div class="body">RDAP (Registration Data Access Protocol) is the successor to WHOIS: a public query to the regional internet registries (ARIN, RIPE, APNIC, …) that returns who an IP range is registered to. The tool uses it to label each observed source IP with an owner, so the proposed rules are reviewable ("Acme Corp" rather than a bare CIDR). <strong>Treat RDAP as a signal, not a source of truth</strong> — registration data can be stale, generic (a hosting provider rather than the real user), or delegated, so use it to inform your review, not to make the decision for you. It's disabled with <code class="inline">--no-enable-rdap</code> (but the <code class="inline">maximum</code> framing needs it).</div></details>
       <details><summary>Learn more — threat-intel enrichment</summary><div class="body">Observed IPs that fall in known-bad ranges are excluded from the allow-list and surfaced for investigation. Databricks-owned control-plane / serverless ranges you actually saw are always kept. All feeds are free, need no API key, and are cached locally.</div></details>
       <details><summary>Learn more — partner platforms</summary><div class="body">Observed IPs that fall in a known SaaS <strong>partner-platform</strong> range — <strong>Power BI</strong> (from the Azure Service Tags feed), <strong>dbt platform</strong> and <strong>Tableau Cloud</strong> (both curated in-repo) — are labelled as that partner and recommended for allow-listing. Databricks also offers a managed "Partner platforms" ingress source (Beta; AWS + GCP) that maintains these IP lists for you; the tool flags it, but since the SDK can't set that source yet, matched IPs are emitted as labelled CIDR allow rules.</div></details>
-      <details><summary>Learn more — dry-run denials as candidates</summary><div class="body">If you've already stood up a <em>dry-run</em> CBI ingress policy, <code class="inline">system.access.inbound_network</code> records the public IPs it <em>would</em> have denied (<code class="inline">access_type=DRY_RUN_DENIAL</code>). The tool folds those into the candidate set — they're exactly the inbound clients your log-only allow-list doesn't cover yet — so you can observe, then complete the allow-list from what it would have blocked. On by default; <code class="inline">--no-include-inbound-network</code> opts out. (Enforced <code class="inline">DROP</code> denials feed the recently-denied view below instead.)</div></details>
+      <details><summary>Learn more — dry-run denials as candidates</summary><div class="body">If you've already stood up a <em>dry-run</em> CBI ingress policy, <code class="inline">system.access.inbound_network</code> records the public IPs it <em>would</em> have denied (<code class="inline">policy_outcome=DRY_RUN_DENIAL</code>). The tool folds those into the candidate set — they're exactly the inbound clients your log-only allow-list doesn't cover yet — so you can observe, then complete the allow-list from what it would have blocked. On by default; <code class="inline">--no-include-inbound-network</code> opts out. (Enforced <code class="inline">DROP</code> denials feed the recently-denied view below instead.)</div></details>
       <details><summary>No candidate IPs?</summary><div class="body">Usually the workspace uses <strong>PrivateLink/NAT</strong> (the audit log records the relay's private IP, not the user's public IP), or the public IPs only appear on account-level rows — pass <code class="inline">--include-account-level</code>. The CLI prints a diagnostic funnel explaining where rows dropped out. See <a href="https://docs.databricks.com/admin/system-tables/audit-logs.html">audit system table docs</a>.</div></details>
     </li>
     <li id="ig-denied">
@@ -352,6 +360,12 @@ uv run dbx-nwp-helper --help</pre>
     <li id="ig-preview">
       <h3>Preview the proposed policy</h3>
       <p>The exact allow (and any deny) rules are shown before anything is written. This is the object that would be sent to the account API.</p>
+    </li>
+    <li id="ig-limits">
+      <h3>Over the policy limits? Consolidate, don't drop</h3>
+      <p>A CBI policy holds at most <strong>50 ingress rules</strong> and <strong>2,000 CIDRs</strong>. Every owner group becomes its own labelled rule, so a large environment hits the rule cap long before the CIDR cap. When that happens the tool <strong>offers to consolidate</strong>: the highest-traffic owners keep their named rules and the rest are folded into <code class="inline">Consolidated-Observed-IPs</code> rule(s) — so every observed IP stays in the policy. Answer <em>yes</em> (the default) and it rebuilds and re-previews; <code class="inline">--yes</code> consolidates automatically; <code class="inline">--no-consolidate-rules</code> keeps the plain drop-the-tail behaviour.</p>
+      <p>Anything that still has to be trimmed (for example a threat-intel deny list over the CIDR cap) is shown in a <strong>red panel</strong> that you must acknowledge, and repeated once more right before the write.</p>
+      <details><summary>Learn more — how consolidation works</summary><div class="body">Rules are ranked by observed events. Databricks-owned ranges and migrated IP-access-list rules are never folded. Folded rules are merged only with rules of the same shape (same destination and identity scoping), so a consolidated rule never widens a scoped rule; adjacent CIDRs are merged losslessly; room is reserved for deny rules. IPs are lost only when the <em>CIDR</em> cap itself is exceeded. If that happens and the allow-list includes <strong>partner-platform</strong> ranges (Power BI / dbt / Tableau), an interactive run offers to leave those CIDRs out so you can add the partners through the account console's managed <em>Partner platforms</em> source instead — Databricks keeps those ranges current and they don't count against the cap. Remember to add the partner in the console afterwards; until then it isn't allow-listed.</div></details>
     </li>
     <li id="ig-export">
       <h3>Export (optional)</h3>
@@ -428,7 +442,7 @@ uv run dbx-nwp-helper --help</pre>
     </li>
     <li id="eg-preview">
       <h3>Preview the proposed egress</h3>
-      <p>The exact storage + internet allow rules (and any blocked domains) are shown before anything is written — the object that would be sent to the account API. Egress limits (100 internet / 100 storage) are enforced here, keeping the highest-traffic destinations.</p>
+      <p>The exact storage + internet allow rules (and any blocked domains) are shown before anything is written — the object that would be sent to the account API. Egress limits (100 internet / 100 storage) are enforced here, keeping the highest-traffic destinations; anything trimmed is shown in a red panel you must acknowledge, repeated right before the write.</p>
     </li>
     <li id="eg-export">
       <h3>Export (optional)</h3>
@@ -458,6 +472,7 @@ uv run dbx-nwp-helper --help</pre>
       <li>🧬 <strong>Databricks-owned traffic is prioritised, never blanket-allowed.</strong> Only ranges actually seen in your traffic are kept.</li>
       <li>🧩 <strong>Public, private &amp; cross-workspace are independent.</strong> Each is migrated or carried forward from the existing policy; the per-dimension pre-check aborts only when a <em>migrated</em> dimension would overwrite a <em>restrictive</em> existing block.</li>
       <li>🔁 <strong>Existing CBI blocks are reused, not clobbered.</strong> Front-end PrivateLink (AWS/GCP) is migrated into private access; cross-workspace is always carried forward.</li>
+      <li>📏 <strong>Limits are handled in the open.</strong> Over the 50-rule cap you're offered consolidation into <code class="inline">Consolidated-Observed-IPs</code> instead of a silent trim; anything still dropped is shown in a red panel at the decision gate and again before the write.</li>
       <li>#️⃣ <strong>IPv4 only.</strong> The CBI schema is IPv4-only; IPv6 is analysed but never placed in a policy.</li>
       <li>🧱 <strong>add_to_existing never clobbers the other direction.</strong> It replaces only its own block.</li>
     </ul>
@@ -501,6 +516,9 @@ uv run dbx-nwp-helper --help</pre>
     <div class="opt"><code class="flag">--scoping-mode &lt;mode&gt;</code><span class="chip">default: ip_only</span><p>Whether to scope rules beyond source IP: <span class="choices">ip_only</span>, <span class="choices">ip_and_destination</span>, <span class="choices">ip_and_identity</span>, or <span class="choices">ip_identity_and_destination</span> (identity scoping needs account admin).</p></div>
     <div class="opt"><code class="flag">--block-threat-ips &lt;mode&gt;</code><span class="chip">default: off</span><p>Deny known-bad source IPs via CBI deny rules: <span class="choices">off</span>, <span class="choices">matched_only</span> (feeds that matched observed IPs), or <span class="choices">all</span>. When not <code class="inline">off</code>, an <strong>interactive</strong> run then asks which threat-intel feeds to use (headless runs use all). Independently of this setting, source IPs on a feed are <em>always</em> flagged and kept out of the allow-list. The IP-side mirror of egress <code class="inline">--block-threat-domains</code>.</p></div>
     <div class="opt"><code class="flag">--deny-denied-ips</code><p>Add the recently-denied inbound source IPs (403 / CBI) as deny rules, rather than just reporting them.</p></div>
+    <div class="opt"><code class="flag">--consolidate-rules / --no-consolidate-rules</code><span class="chip">default: prompt</span><p>When the proposed allow rules exceed the 50-rule cap, fold the lowest-traffic owner groups into <code class="inline">Consolidated-Observed-IPs</code> rule(s) so their IPs stay in the policy. Interactive runs are asked (default yes); <code class="inline">--yes</code> consolidates; <code class="inline">--no-consolidate-rules</code> drops the tail instead.</p></div>
+    <div class="opt"><code class="flag">--uc-schema &lt;catalog.schema&gt;</code><p>Persist the analysis to Unity Catalog: a per-day source-IP aggregate (<code class="inline">dbx_nwp_ingress_daily</code>, kept up to date incrementally and read instead of re-scanning <code class="inline">system.access.audit</code>) plus a per-run snapshot of the proposed rules and their fate (<code class="inline">dbx_nwp_ingress_suggestions</code>). Needs <code class="inline">CREATE TABLE</code> / <code class="inline">MODIFY</code> on the schema.</p></div>
+    <div class="opt"><code class="flag">--refresh-persisted</code><p>With <code class="inline">--uc-schema</code>: rebuild the persisted daily table from scratch instead of appending the missing days.</p></div>
     <div class="opt"><code class="flag">--disable-existing-ip-acls</code><p>After creating <em>and</em> assigning an <em>enforced</em> policy, turn off the workspace's IP access lists (<code class="inline">enableIpAccessLists=false</code>). Requires <code class="inline">--create-policy</code>, <code class="inline">--auto-assign</code> and <code class="inline">--policy-mode enforce</code>; ignored when the policy inherits dry-run from the existing CBI policy. The lists are preserved (reversible).</p></div>
   </div></details>
 
