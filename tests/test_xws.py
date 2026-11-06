@@ -1,5 +1,8 @@
 """Cross-workspace egress destinations (core/xws.py + the egress engine / policy merge) and the
-egress hostname validation that replaced the live "'local' is not a valid hostname" apply failure."""
+egress hostname validation that replaced the live "'local' is not a valid hostname" apply failure.
+
+All hostnames and workspace ids below are synthetic placeholders shaped like the real ones (Apps /
+AI-gateway / Azure / GCP / AWS-deployment hosts) — not real workspaces."""
 
 from __future__ import annotations
 
@@ -18,19 +21,19 @@ from dbx_nwp_helper.core import policy, xws
 @pytest.mark.parametrize(
     "host,expected",
     [
-        ("cac-lakebase-mcp-7474659688817102.aws.databricksapps.com", (7474659688817102, "apps-url")),
-        ("fox-mcp-server-b-7405617080752524.4.azure.databricksapps.com", (7405617080752524, "apps-url")),
-        ("7474659574694750.ai-gateway.cloud.databricks.com", (7474659574694750, "ai-gateway-url")),
+        ("example-app-7474650000000011.aws.databricksapps.com", (7474650000000011, "apps-url")),
+        ("example-app-b-7474650000000012.4.azure.databricksapps.com", (7474650000000012, "apps-url")),
+        ("7474650000000013.ai-gateway.cloud.databricks.com", (7474650000000013, "ai-gateway-url")),
         ("adb-1234567890123456.7.azuredatabricks.net", (1234567890123456, "azure-url")),
         ("1234567890123456.3.gcp.databricks.com", (1234567890123456, "gcp-url")),
-        ("dbc-3c72c865-78d5.cloud.databricks.com", (None, "aws-deployment-name")),
-        ("e2-demo-field-eng.cloud.databricks.com", (None, "aws-deployment-name")),
-        ("ep-falling-bread-d258xcy8.database.us-east-1.cloud.databricks.com", (None, "lakebase-endpoint")),
+        ("dbc-00000000-0000.cloud.databricks.com", (None, "aws-deployment-name")),
+        ("example-deployment.cloud.databricks.com", (None, "aws-deployment-name")),
+        ("ep-example-abc123.database.us-east-1.cloud.databricks.com", (None, "lakebase-endpoint")),
         ("docs.databricks.com", (None, "platform-host")),
         ("www.databricks.com", (None, "platform-host")),
         ("npm-proxy.dev.databricks.com", (None, "platform-host")),
-        ("jaeger-collector.privileged.staging.dbns.databricks.com", (None, "platform-host")),
-        ("fake-spog.databricks.com", (None, "unknown-host-shape")),
+        ("example-service.privileged.staging.dbns.databricks.com", (None, "platform-host")),
+        ("example-host.databricks.com", (None, "unknown-host-shape")),
         ("app-v2.aws.databricksapps.com", (None, "unknown-host-shape")),  # short digits ≠ an id
         ("adb-0000000000000000.0.azuredatabricks.net", (None, "unknown-host-shape")),  # zero id
     ],
@@ -71,10 +74,10 @@ def test_resolve_groups_hosts_by_workspace_and_excludes_own():
 
 
 def test_resolve_uses_account_workspace_list_for_aws_deployment_names():
-    acct = _Acct([("dbc-3c72c865-78d5", 7474650000000003), ("e2-demo-field-eng", 7474650000000004)])
+    acct = _Acct([("dbc-00000000-0000", 7474650000000003), ("example-deployment", 7474650000000004)])
     hosts = {
-        "dbc-3c72c865-78d5.cloud.databricks.com": 7,
-        "e2-demo-field-eng.cloud.databricks.com": 2,
+        "dbc-00000000-0000.cloud.databricks.com": 7,
+        "example-deployment.cloud.databricks.com": 2,
         "someone-elses.cloud.databricks.com": 1,
     }
     res = xws.resolve(hosts, account=acct)
@@ -88,17 +91,17 @@ def test_resolve_uses_account_workspace_list_for_aws_deployment_names():
 
 
 def test_resolve_without_account_flags_aws_hosts_with_reason():
-    res = xws.resolve({"dbc-3c72c865-78d5.cloud.databricks.com": 7})
+    res = xws.resolve({"dbc-00000000-0000.cloud.databricks.com": 7})
     assert res.resolved == {}
     assert res.unresolved == [
-        ("dbc-3c72c865-78d5.cloud.databricks.com", "aws-deployment-name-needs-account-lookup")
+        ("dbc-00000000-0000.cloud.databricks.com", "aws-deployment-name-needs-account-lookup")
     ]
     assert "aws-deployment-name-needs-account-lookup" in xws.REASON_TEXT
 
 
 def test_resolve_survives_account_lookup_failure():
     acct = _Acct([], raise_=True)
-    res = xws.resolve({"dbc-3c72c865-78d5.cloud.databricks.com": 7}, account=acct)
+    res = xws.resolve({"dbc-00000000-0000.cloud.databricks.com": 7}, account=acct)
     assert res.resolved == {} and res.account_lookup is True
     assert res.unresolved[0][1] == "aws-deployment-name-not-in-this-account"
 
@@ -122,7 +125,7 @@ def _observed(rows):
 def test_analyze_turns_databricks_hosts_into_cross_workspace_destinations(monkeypatch):
     observed = _observed(
         [
-            ("mcp-demo-7474650000000001.aws.databricksapps.com", 20),
+            ("example-app-7474650000000001.aws.databricksapps.com", 20),
             ("7474650000000002.ai-gateway.cloud.databricks.com", 8),
             ("7474650000000009.ai-gateway.cloud.databricks.com", 4),  # own workspace
             ("docs.databricks.com", 2),
@@ -136,14 +139,14 @@ def test_analyze_turns_databricks_hosts_into_cross_workspace_destinations(monkey
     assert a.xws is not None and a.xws.workspace_ids == [7474650000000001, 7474650000000002]
     assert a.xws_selected == [7474650000000001, 7474650000000002]
     assert a.skipped_databricks_urls == ["docs.databricks.com"]  # only the unresolved host is flagged
-    assert a.databricks_hosts["mcp-demo-7474650000000001.aws.databricksapps.com"] == 20
+    assert a.databricks_hosts["example-app-7474650000000001.aws.databricksapps.com"] == 20
     na = eg.build_blocks(a, cfg)[eg.ALL_WORKSPACES].as_dict()["network_access"]
     assert na["allowed_databricks_destinations"] == [{"workspace_ids": [7474650000000001, 7474650000000002]}]
     assert {d["destination"] for d in na["allowed_internet_destinations"]} == {"api.openai.com"}
 
 
 def test_cross_workspace_off_leaves_hosts_flagged_only(monkeypatch):
-    observed = _observed([("mcp-demo-7474650000000001.aws.databricksapps.com", 20), ("api.openai.com", 5)])
+    observed = _observed([("example-app-7474650000000001.aws.databricksapps.com", 20), ("api.openai.com", 5)])
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     cfg = EgressConfig(
         enable_rdap=False,
@@ -159,7 +162,7 @@ def test_cross_workspace_off_leaves_hosts_flagged_only(monkeypatch):
 
 def test_cross_workspace_only_block_still_builds(monkeypatch):
     # A run whose only egress is to another workspace still produces a (restricted) block.
-    observed = _observed([("mcp-demo-7474650000000001.aws.databricksapps.com", 20)])
+    observed = _observed([("example-app-7474650000000001.aws.databricksapps.com", 20)])
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
     a = eg.analyze(cfg, sql_conn=None)
@@ -173,7 +176,7 @@ def test_per_workspace_target_never_lists_itself(monkeypatch):
     observed = pd.DataFrame(
         [
             {
-                "destination": "mcp-demo-7474650000000001.aws.databricksapps.com",
+                "destination": "example-app-7474650000000001.aws.databricksapps.com",
                 "destination_type": "DNS",
                 "events": 3,
                 "workspace_ids": [7474650000000001, 7474650000000002],
@@ -305,15 +308,15 @@ def test_resolve_treats_host_called_only_by_its_own_workspace_as_same_workspace(
     # The live finding: under all_workspaces scope every workspace calling its OWN app "resolved" to
     # itself. A host whose only callers are the workspace in its hostname is not cross-workspace.
     hosts = {
-        "mcp-store-sp-7474656978175256.aws.databricksapps.com": 5,
+        "self-app-7474650000000014.aws.databricksapps.com": 5,
         "shared-app-7474650000000001.aws.databricksapps.com": 9,
     }
     sources = {
-        "mcp-store-sp-7474656978175256.aws.databricksapps.com": {7474656978175256},
+        "self-app-7474650000000014.aws.databricksapps.com": {7474650000000014},
         "shared-app-7474650000000001.aws.databricksapps.com": {7474650000000001, 7474650000000002},
     }
     res = xws.resolve(hosts, sources=sources)
-    assert res.own == ["mcp-store-sp-7474656978175256.aws.databricksapps.com"]
+    assert res.own == ["self-app-7474650000000014.aws.databricksapps.com"]
     assert res.workspace_ids == [7474650000000001]  # also called by another workspace → genuine xws
 
 
