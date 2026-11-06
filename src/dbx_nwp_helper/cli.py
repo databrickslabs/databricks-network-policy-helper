@@ -1340,8 +1340,9 @@ def _confirm_truncation(
 
 
 def _recap_truncation(truncations: list[str], summary: dict | None, stage: str) -> None:
-    """Repeat the truncation panel (no prompt) right before an irreversible-looking step — the export
-    or the write — so a trimmed policy is never exported/applied with the warning scrolled away."""
+    """Repeat the truncation panel (no prompt) right before the write, so a trimmed policy is never
+    applied with the warning scrolled away. (Not repeated before --export: the gate just above it is
+    enough there.)"""
     if truncations:
         console.truncation_panel(truncations, summary, stage=stage)
 
@@ -2352,7 +2353,6 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
 
     if cfg.export:
         if previews:
-            _recap_truncation(analysis.truncations, analysis.truncation_summary, "before export")
             payload = rules.export_payload(
                 policies, cfg, conn.account_id or "", auth.this_workspace_id(conn), profile=conn.profile
             )
@@ -2544,7 +2544,6 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
 
     if cfg.export:
         if previews:
-            _recap_truncation(analysis.truncations, None, "before export")
             # this_ws is set for current_workspace (the only scope whose name uses it); None otherwise.
             payload = eg.export_payload(analysis, cfg, conn.account_id or "", this_ws, profile=conn.profile)
             _export_policy(cfg.export, payload, yes)

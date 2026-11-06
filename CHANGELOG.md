@@ -50,8 +50,8 @@ Scale release for large environments (thousands of source IPs / hundreds of owne
 
 - **Truncation warnings are now impossible to miss.** Any policy-limit truncation is shown in a bold
   red panel (with rule / CIDR / identity drop counts and every itemised message) at the decision gate
-  — printed even under `--yes` — and **repeated right before `--export` and before the write** on
-  both `ingress` and `egress`, so a trimmed policy can't slip through with the warning scrolled away.
+  — printed even under `--yes` — and **repeated right before the write** on both `ingress` and
+  `egress`, so a trimmed policy can't slip through with the warning scrolled away.
 - The ingress configuration panel shows `consolidate_rules`, `uc_schema` and any overridden limits.
 
 ### Fixed

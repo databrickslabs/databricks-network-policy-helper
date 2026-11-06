@@ -403,7 +403,7 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
   interactive run offers to leave **partner-platform** CIDRs (Power BI / dbt / Tableau) out so you can
   add those partners via the console's managed *Partner platforms* source instead (which Databricks
   keeps current and which doesn't count against the cap). Any truncation that does happen is shown in
-  a **red panel** at the decision gate and again right before export / write. `--no-consolidate-rules`
+  a **red panel** at the decision gate and again right before the write. `--no-consolidate-rules`
   restores the plain drop-the-tail behaviour.
 - **`--uc-schema catalog.schema` (ingress persistence).** For big audit logs the SQL step dominates.
   With `--uc-schema` the tool keeps a per-(day, workspace, source IP, outcome) aggregate table

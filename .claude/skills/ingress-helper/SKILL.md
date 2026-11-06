@@ -182,7 +182,7 @@ CIDRs merged losslessly). IPs are only lost if the **2,000-CIDR** cap is also ex
 interactive run offers to drop **partner-platform** CIDRs in favour of the console's managed *Partner
 platforms* source (remind the user to add the partner there afterwards). Interactive = prompt (default
 yes); `--yes` = consolidate; `--consolidate-rules` / `--no-consolidate-rules` decide up front. Any
-truncation that still happens is shown in a **red panel** at the gate and again before export/write.
+truncation that still happens is shown in a **red panel** at the gate and again before the write.
 
 **`--uc-schema <catalog.schema>` — persist to Unity Catalog.** For slow audit scans, pass a schema the
 user can `CREATE TABLE` in: the tool keeps `dbx_nwp_ingress_daily` (per-day source-IP aggregate,
