@@ -1,6 +1,6 @@
 ---
 name: ingress-helper
-description: Suggest and optionally apply Databricks Context-Based Ingress (CBI) network-policy allow-lists from real audit-log traffic, using the dbx-nwp-helper CLI. Use when the user wants to build/suggest a context-based ingress policy, tighten inbound network access, allow-list source IPs, analyse who connects to a workspace and from where, or turn system.access.audit logs into a CBI / account network-policy proposal. Runs `dbx-nwp-helper ingress` (or the guided wizard), which analyses public source IPs carrying successful traffic, enriches them with open threat-intelligence and cloud-provider ranges plus RDAP ownership, proposes minimal/optimal/maximum CIDR framings optionally scoped by destination (Apps/Lakebase) and identity (users/SPs), and can write the result into a network policy's dry-run (log-only) or enforced ingress block via the Databricks SDK.
+description: Suggest and optionally apply Databricks Context-Based Ingress (CBI) network policies with the dbx-nwp-helper CLI. Use when the user wants to build/suggest a CBI or ingress allow-list, tighten inbound access, allow-list source IPs, analyse who connects from where, review a dry-run policy, hand a proposal to the workspace owners to test (`--review-pack`), or respond to a leaked token. Runs `dbx-nwp-helper ingress` (or the guided wizard), which turns system.access.audit traffic into minimal/optimal/maximum CIDR framings enriched with threat-intel, cloud ranges and RDAP ownership, optionally scoped by destination and identity, and can write them into a policy's dry-run (log-only) or enforced ingress block.
 ---
 
 # Context-Based Ingress (CBI) Helper
@@ -18,9 +18,15 @@ policy, run one direction with `--policy-action create_new`, then the other with
 
 ## When to use
 
-The user wants to: suggest/build a CBI or ingress allow-list; see which public IPs / identities
-connect to a workspace and from where; tighten inbound network access from observed traffic; or
-trial an ingress policy in dry-run before enforcing.
+To first assess where workspaces stand ("how exposed are we?", "are we ready for CBI?"), use the
+`posture-helper` skill (`dbx-nwp-helper posture`). Then this skill builds the policy.
+
+
+The user wants to: suggest/build a CBI or ingress
+allow-list; see which public IPs / identities connect to a workspace and from where; tighten inbound
+network access from observed traffic; trial an ingress policy in dry-run before enforcing; give the
+workspace owners a proposal to review and test; or contain a suspected credential leak
+(`references/incident-mode.md`).
 
 ## Setup
 
@@ -55,6 +61,9 @@ The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-nw
 
 ## Workflow
 
+0. **Assess first** (read-only): `uv run dbx-nwp-helper posture --profile <profile> --account-id <id>`
+   scores every workspace's ingress L0 Open → L4 Hardened and names the propose-only next step for
+   each finding — see the `posture-helper` skill.
 1. **Propose-only first** (no `--create-policy`):
    ```bash
    uv run dbx-nwp-helper ingress --profile <profile> --lookback-days 30
@@ -68,6 +77,16 @@ The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-nw
    and, when ready, `--policy-mode enforce`. Add `--auto-assign` to bind the workspace(s).
 4. Or run **`uv run dbx-nwp-helper guided --profile <profile>`** for a structured Q&A wizard that
    walks the user through the same choices interactively.
+
+## Review pack (`--review-pack`)
+
+`ingress … --review-pack <dir>` (propose-only is fine; single-policy scopes) writes the proposal as a
+pack the workspace's owners can review and **test**: `README.md` (what the policy does, warnings, the
+dry-run test plan, exit criteria, rollback and sign-off), `review-sheet.csv` (each rule and range with
+the traffic it covers, flags, and blank keep/drop + owner columns), `uncovered-sources.csv` (observed
+sources enforcing would block), `monitor.sql` (the daily dry-run check) and `policy.json`.
+**Observed traffic is not trust**: the audit log can contain an attacker, so every kept source needs
+an owner who vouches for it. The README's apply command is dry-run; enforcing is the owners' call.
 
 ## CIDR framings (`--policy-framing`)
 
@@ -257,6 +276,10 @@ pending a source).
 
 ## References
 
+- `references/cbi-reference.md` — CBI concepts, interactions, limits and docs links.
+- `references/rollout-patterns.md` — the no-VPN patterns (B1–B4), rollout order, acceptance tests.
+- `references/incident-mode.md` — a suspected credential leak: contain first, then investigate.
+- `references/manual-checks.md` — the same reads with the Databricks CLI, when the tool can't run.
 - `docs/threat-intel-feeds.md` — the enrichment feeds, what each represents, licensing.
 - `docs/cbi-sdk-schema.md` — the verified `AccountNetworkPolicy` SDK object model.
 - `docs/account-admin-setup.md` — account-admin SP + credential setup.

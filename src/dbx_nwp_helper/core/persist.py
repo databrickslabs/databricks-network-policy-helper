@@ -73,6 +73,22 @@ def tables(uc_schema: str) -> PersistedSource:
     )
 
 
+def posture_table(uc_schema: str) -> str:
+    """`--uc-schema` → the persisted posture rollup table (see queries.posture_daily_table_ddl)."""
+    from ..config import UC_POSTURE_DAILY_TABLE
+
+    catalog, schema = uc_schema.strip().rsplit(".", 1)
+    return f"{_quote(catalog)}.{_quote(schema)}.{_quote(UC_POSTURE_DAILY_TABLE)}"
+
+
+def posture_stage_table(stage_schema: str) -> str:
+    """`--stage-schema` → a per-run temporary table name for the posture rollup."""
+    from ..config import UC_POSTURE_STAGE_PREFIX
+
+    catalog, schema = stage_schema.strip().rsplit(".", 1)
+    return f"{_quote(catalog)}.{_quote(schema)}.{_quote(UC_POSTURE_STAGE_PREFIX + uuid.uuid4().hex[:12])}"
+
+
 def ensure_tables(sql_conn, src: PersistedSource, direction: str = "ingress") -> None:
     """Create the direction's two tables if they don't exist yet."""
     from .. import queries, sql
