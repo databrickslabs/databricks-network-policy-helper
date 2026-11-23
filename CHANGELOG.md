@@ -32,6 +32,16 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
   **once per run** into a temporary table (`--stage-schema`), or persisted and synced incrementally as
   `dbx_nwp_posture_daily` (`--uc-schema`, `--refresh-persisted`). Queries run `--parallel 4` at a time,
   each on its own connection. `--skip-traffic` and `--skip-tokens` skip those parts.
+- **`genie-setup` command.** Creates (or updates in place) a Genie agent over the posture tables in a
+  `--uc-schema`, plus any `ingress` / `egress` tables persisted there, for questions in plain English
+  ("which tokens should we revoke?", "what would break if we enforced?"). It creates the `*_latest`
+  views and a `dbx_nwp_inbound_events` view, builds the agent from `src/dbx_nwp_helper/genie/`
+  (instructions, trusted queries over the daily rollup, sample questions), and leaves out example
+  queries whose tables aren't there. It never shares the agent. `--print-only` writes the definition
+  and changes nothing; non-interactive runs need `--yes`.
+- **Posture snapshots.** `posture --uc-schema` also appends each run to `dbx_nwp_posture_workspaces`,
+  `dbx_nwp_posture_findings` and `dbx_nwp_posture_tokens` (one batch per `run_id`), for trends and the
+  Genie agent.
 - **`ingress --review-pack <dir>`.** Writes the proposal as a pack for the workspace's owners to
   review and test: a README (warnings, dry-run test plan, exit criteria, rollback, sign-off), a review
   sheet with the traffic each rule and range covers, the observed sources enforcing would block, a

@@ -46,6 +46,9 @@ UC_SUGGESTIONS_TABLE = "dbx_nwp_ingress_suggestions"
 UC_EGRESS_DAILY_TABLE = "dbx_nwp_egress_daily"
 UC_EGRESS_SUGGESTIONS_TABLE = "dbx_nwp_egress_suggestions"
 UC_POSTURE_DAILY_TABLE = "dbx_nwp_posture_daily"
+UC_POSTURE_FINDINGS_TABLE = "dbx_nwp_posture_findings"
+UC_POSTURE_TOKENS_TABLE = "dbx_nwp_posture_tokens"
+UC_POSTURE_WORKSPACES_TABLE = "dbx_nwp_posture_workspaces"
 UC_POSTURE_STAGE_PREFIX = "dbx_nwp_posture_stage_"
 # Shortest policy name the interactive prompt accepts — a one-letter answer there is almost always a
 # stray "y" meant for a yes/no question (one such run created a policy literally named "y").

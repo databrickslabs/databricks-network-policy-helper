@@ -931,3 +931,112 @@ def posture_inbound_outcomes(lookback_days: int, workspace_ids=None) -> str:
     GROUP BY ALL
     ORDER BY workspace_id, events DESC
     """
+
+
+# ------------------------------------------------------------------ posture snapshots + Genie views
+# `posture --uc-schema` also appends each run's results (one batch per run_id) so they can be tracked
+# over time and queried by the Genie agent (`genie-setup`). The *_latest views show each workspace's
+# most recent run.
+
+
+def posture_workspaces_table_ddl(table: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+      run_id STRING COMMENT 'One id per dbx-nwp-helper posture run',
+      run_at TIMESTAMP,
+      lookback_days INT,
+      workspace_id STRING,
+      workspace_name STRING,
+      pricing_tier STRING,
+      effective_policy_id STRING COMMENT 'Assigned network policy, or default-policy',
+      policy_mode STRING COMMENT 'enforce | dry_run | open | unknown',
+      public_restriction STRING COMMENT 'public_access restriction_mode of the active ingress block',
+      public_allow_rules INT,
+      public_cidrs INT,
+      private_restriction STRING,
+      has_private_link BOOLEAN COMMENT 'Front-end PrivateLink (a PAS with an access level)',
+      pas_public_access_enabled BOOLEAN,
+      ip_acl_checked BOOLEAN COMMENT 'Whether the IP access lists were read (only the --profile workspace)',
+      ip_acl_enabled BOOLEAN COMMENT 'An enabled ALLOW IP access list exists',
+      egress_restricted BOOLEAN,
+      maturity_level INT COMMENT '0 Open, 1 Legacy, 2 Observing, 3 Enforced, 4 Hardened (NULL unknown)',
+      maturity_label STRING,
+      maturity_reason STRING,
+      pats_checked BOOLEAN COMMENT 'Whether the token inventory was read (only the --profile workspace)',
+      pats_total INT,
+      pats_never_expire INT,
+      pats_unscoped INT,
+      max_token_lifetime_days INT,
+      pats_all_users BOOLEAN COMMENT 'The users group may create and use tokens'
+    )
+    USING DELTA
+    COMMENT 'dbx-nwp-helper: posture snapshot per workspace (append-only, one batch per run_id)'
+    """
+
+
+def posture_findings_table_ddl(table: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+      run_id STRING,
+      run_at TIMESTAMP,
+      workspace_id STRING COMMENT 'Workspace id, or account for account-wide findings',
+      finding_id STRING COMMENT 'CBI-001 … (stable across runs)',
+      severity STRING COMMENT 'critical | high | medium | low | info',
+      title STRING,
+      detail STRING,
+      recommendation STRING,
+      next_step STRING COMMENT 'A propose-only dbx-nwp-helper command, or a read-only CLI command',
+      docs STRING
+    )
+    USING DELTA
+    COMMENT 'dbx-nwp-helper: posture findings (append-only, one batch per run_id)'
+    """
+
+
+def posture_tokens_table_ddl(table: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+      run_id STRING,
+      run_at TIMESTAMP,
+      workspace_id STRING,
+      token_id STRING COMMENT 'Token id (never the token value; the API does not return it)',
+      owner STRING,
+      created DATE,
+      expires STRING COMMENT 'Expiry date, or never',
+      last_used DATE,
+      scopes STRING COMMENT 'API scopes, or all APIs',
+      reasons STRING COMMENT 'Why it is worth reviewing: never expires / unused / no scopes / long-lived'
+    )
+    USING DELTA
+    COMMENT 'dbx-nwp-helper: personal access tokens worth revoking, per posture run (nothing is revoked)'
+    """
+
+
+def posture_latest_view(view: str, table: str, per: str = "workspace_id") -> str:
+    """Each `per` key's rows from its most recent run (all rows of that run)."""
+    return f"""
+    CREATE OR REPLACE VIEW {view}
+    COMMENT 'dbx-nwp-helper: the latest posture run per {per} (from {table.split(".")[-1].strip("`")})'
+    AS SELECT * FROM {table}
+    QUALIFY dense_rank() OVER (PARTITION BY {per} ORDER BY run_at DESC) = 1
+    """
+
+
+def inbound_events_view(view: str, days: int = 90) -> str:
+    """CBI denials and dry-run would-be denials from system.access.inbound_network (rolling `days`), with
+    the outcome normalised as core/posture.outcome_class does."""
+    return f"""
+    CREATE OR REPLACE VIEW {view}
+    COMMENT 'dbx-nwp-helper: CBI denials (DENIED) and dry-run would-be denials (DRY_RUN_DENIAL), last {days}d'
+    AS SELECT CAST(workspace_id AS STRING) AS workspace_id, event_time,
+      CAST(event_time AS DATE) AS event_date,
+      source.ip AS source_ip, authenticated_as, rule_label, request_path,
+      CASE
+        WHEN upper(policy_outcome) LIKE '%DRY%RUN%' THEN 'DRY_RUN_DENIAL'
+        WHEN upper(policy_outcome) IN ('DENIED', 'DENY', 'DROP') THEN 'DENIED'
+        ELSE upper(policy_outcome)
+      END AS outcome
+    FROM system.access.inbound_network
+    WHERE event_time >= current_date() - INTERVAL {int(days)} DAYS
+      AND upper(policy_outcome) <> 'ALLOWED'
+    """

@@ -97,6 +97,26 @@ so the fix is revoke + replace (OAuth U2M for people, OAuth M2M / workload ident
 automation). Tokens are read for the `--profile` workspace; the account console's **Security → Token
 report** covers every workspace.
 
+## Genie agent (`genie-setup`)
+
+For questions in plain English ("which tokens should we revoke?", "what would break if we enforced?"),
+build a Genie agent over the posture tables:
+
+```bash
+uv run dbx-nwp-helper posture --profile <ws> --account-id <id> --uc-schema security.posture   # once, then on a schedule
+uv run dbx-nwp-helper genie-setup --profile <ws> --uc-schema security.posture [--warehouse-http-path …] [--title …]
+```
+
+`posture --uc-schema` appends each run to `dbx_nwp_posture_workspaces`, `dbx_nwp_posture_findings` and
+`dbx_nwp_posture_tokens` (and keeps the `dbx_nwp_posture_daily` rollup), so answers stay current and
+trends work. `genie-setup` **writes**: it creates or replaces the `*_latest` views and
+`dbx_nwp_inbound_events` in that schema, and creates the agent (or updates the one with the same
+title). Ask before running it; it refuses non-interactive runs without `--yes`, and `--print-only
+<file>` writes the agent definition and changes nothing. It also picks up the `ingress` / `egress`
+tables when they were persisted to the same schema. It never shares the agent: share it (CAN RUN) by
+hand, and grant viewers SELECT on the schema, because Genie runs queries as the person asking. The
+agent answers questions; it doesn't change policies or revoke tokens.
+
 ## References
 
 - `references/posture-checks.md` — every check, the maturity rules, `tokens-to-revoke.csv`, known limits.
@@ -105,3 +125,4 @@ report** covers every workspace.
 - `../ingress-helper/references/incident-mode.md` — a suspected credential leak: contain first.
 - `../ingress-helper/references/manual-checks.md` — the same reads with the Databricks CLI.
 - `docs/examples/posture/report.md` — sample output on a synthetic 4-workspace account.
+- `src/dbx_nwp_helper/genie/` — the agent's instructions, trusted queries and sample questions.
