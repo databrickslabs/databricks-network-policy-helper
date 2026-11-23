@@ -314,6 +314,12 @@ The repo ships [Claude Code skills](https://docs.claude.com/en/docs/claude-code)
 [`.claude/skills/`](.claude/skills/) — one per tool (`ingress-helper`, `egress-helper`) — so you can
 drive the CLI conversationally. Each skill's `SKILL.md` is also the tool's reference doc.
 
+A third skill, **`cbi-posture`**, comes *before* the other two: a read-only diagnostic that scores each
+workspace's ingress posture (L0 Open → L4 Hardened), maps findings to credential-theft defense layers,
+and hands every fix to `dbx-nwp-helper` as a propose-only command. It can also build a sample CBI
+policy for an account team to test and set up a "CBI Security Posture" Genie agent over the same data.
+See [`docs/cbi-posture.md`](docs/cbi-posture.md).
+
 ## 🗂️ Repo layout
 
 | Path | What |
@@ -326,7 +332,9 @@ drive the CLI conversationally. Each skill's `SKILL.md` is also the tool's refer
 | `src/dbx_nwp_helper/{auth,sql,queries}.py` | 🔌 Unified auth, SQL-warehouse connection, system-table queries. |
 | `src/dbx_nwp_helper/{console,render}.py` | 🎨 Rich theming + result rendering. |
 | `.claude/skills/<tool>/SKILL.md` | 📚 Per-tool reference doc + Claude skill. |
+| `.claude/skills/cbi-posture/` | 🩺 Read-only CBI posture diagnostic: scripts, SQL, notebook, Genie assets, synthetic examples. |
 | `docs/account-admin-setup.md` | 👑 Account-admin credential setup (applying a policy). |
+| `docs/cbi-posture.md` | 🩺 The `cbi-posture` diagnostic: quick start, sample policy, safety. |
 | `docs/cbi-sdk-schema.md` | 🧩 The verified `AccountNetworkPolicy` SDK object model. |
 | `docs/threat-intel-feeds.md` | 🕵️ The enrichment feeds, what each represents, licensing. |
 | `tests/` | ✅ Offline engine tests (fixtures; no Databricks/network). |

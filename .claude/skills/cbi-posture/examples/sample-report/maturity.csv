@@ -1,0 +1,5 @@
+workspace_id,workspace_name,policy,mode,level,label,why,high,medium
+1001,sandbox-dev,default-policy,open,0,Open,No restrictive CBI public block and no enabled allow IP access list,2,2
+1002,analytics-prod,default-policy,open,1,Legacy perimeter,IP access lists only; no restrictive CBI public block,2,3
+1003,finance-prod,finance,dry_run,2,Observing,`finance` restricts public access in dry-run only (log-only),0,3
+1004,ml-prod,ml,enforce,3,Enforced,`ml` enforces a restricted public allow-list,1,0

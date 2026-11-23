@@ -1,0 +1,109 @@
+{
+  "account_id": "00000000-0000-0000-0000-000000000000",
+  "network_policy_id": "analytics-cbi-sample",
+  "egress": {
+    "network_access": {
+      "restriction_mode": "FULL_ACCESS"
+    }
+  },
+  "ingress_dry_run": {
+    "public_access": {
+      "restriction_mode": "RESTRICTED_ACCESS",
+      "allow_rules": [
+        {
+          "label": "corp",
+          "origin": {
+            "included_ip_ranges": {
+              "ip_ranges": [
+                "198.51.100.0/24",
+                "52.0.0.0/8"
+              ]
+            }
+          },
+          "destination": {
+            "all_destinations": true
+          }
+        },
+        {
+          "label": "databricks-aws",
+          "origin": {
+            "included_ip_ranges": {
+              "ip_ranges": [
+                "3.33.0.10/32"
+              ]
+            }
+          },
+          "destination": {
+            "all_destinations": true
+          }
+        },
+        {
+          "label": "Power-BI",
+          "origin": {
+            "included_ip_ranges": {
+              "ip_ranges": [
+                "20.40.1.0/26"
+              ]
+            }
+          },
+          "destination": {
+            "all_destinations": true
+          }
+        },
+        {
+          "label": "Zscaler-Inc",
+          "origin": {
+            "included_ip_ranges": {
+              "ip_ranges": [
+                "165.225.0.10/32",
+                "165.225.0.11/32"
+              ]
+            }
+          },
+          "destination": {
+            "all_destinations": true
+          }
+        },
+        {
+          "label": "Example-ISP",
+          "origin": {
+            "included_ip_ranges": {
+              "ip_ranges": [
+                "203.0.113.77/32"
+              ]
+            }
+          },
+          "destination": {
+            "all_destinations": true
+          }
+        },
+        {
+          "label": "Consolidated-Observed-IPs",
+          "origin": {
+            "included_ip_ranges": {
+              "ip_ranges": [
+                "192.0.2.10/32",
+                "192.0.2.20/32"
+              ]
+            }
+          },
+          "destination": {
+            "all_destinations": true
+          }
+        }
+      ],
+      "deny_rules": [
+        {
+          "label": "deny-recently-denied",
+          "origin": {
+            "included_ip_ranges": {
+              "ip_ranges": [
+                "203.0.113.9/32"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

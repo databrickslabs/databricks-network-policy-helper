@@ -1,0 +1,524 @@
+{
+  "generated_at": "2026-11-18 06:00:00",
+  "lookback_days": 30,
+  "tool_version": "0.1.0",
+  "workspace_profile": "dev",
+  "collection_notes": [],
+  "account": {
+    "policies_read": true,
+    "account_policy": {
+      "network_policy_id": "account-policy",
+      "ingress": {
+        "public_access": {
+          "restriction_mode": "FULL_ACCESS"
+        }
+      }
+    }
+  },
+  "workspaces": [
+    {
+      "workspace_id": "1001",
+      "workspace_name": "sandbox-dev",
+      "pricing_tier": "ENTERPRISE",
+      "assignment_read": true,
+      "assigned_policy_id": null,
+      "effective_policy_id": "default-policy",
+      "policy": {
+        "network_policy_id": "default-policy",
+        "ingress": {
+          "public_access": {
+            "restriction_mode": "FULL_ACCESS"
+          }
+        },
+        "egress": {
+          "network_access": {
+            "restriction_mode": "FULL_ACCESS"
+          }
+        }
+      },
+      "ip_acl": {
+        "enabled": false,
+        "lists": []
+      },
+      "pas": null,
+      "profile": "dev",
+      "pat": {
+        "max_token_lifetime_days": null,
+        "tokens_enabled": true,
+        "all_users_can_use": true,
+        "tokens": [
+          {
+            "token_id": "tok-1001-1",
+            "created_by_username": "etl-owner@example.com",
+            "expiry_time": -1,
+            "scopes": []
+          },
+          {
+            "token_id": "tok-1001-2",
+            "created_by_username": "analyst@example.com",
+            "expiry_time": 1795864000000,
+            "scopes": [
+              "sql"
+            ],
+            "last_used_day": 1784632000000
+          }
+        ]
+      }
+    },
+    {
+      "workspace_id": "1002",
+      "workspace_name": "analytics-prod",
+      "pricing_tier": "ENTERPRISE",
+      "assignment_read": true,
+      "assigned_policy_id": null,
+      "effective_policy_id": "default-policy",
+      "policy": {
+        "network_policy_id": "default-policy",
+        "ingress": {
+          "public_access": {
+            "restriction_mode": "FULL_ACCESS"
+          }
+        },
+        "egress": {
+          "network_access": {
+            "restriction_mode": "FULL_ACCESS"
+          }
+        }
+      },
+      "ip_acl": {
+        "enabled": true,
+        "lists": [
+          {
+            "label": "corp",
+            "list_type": "ALLOW",
+            "enabled": true,
+            "ip_addresses": [
+              "198.51.100.0/24",
+              "52.0.0.0/8"
+            ]
+          }
+        ]
+      },
+      "pas": null,
+      "profile": "analytics",
+      "pat": {
+        "max_token_lifetime_days": null,
+        "tokens_enabled": true,
+        "all_users_can_use": false,
+        "tokens": [
+          {
+            "token_id": "tok-1002-1",
+            "created_by_username": "etl-owner@example.com",
+            "expiry_time": -1,
+            "scopes": []
+          },
+          {
+            "token_id": "tok-1002-2",
+            "created_by_username": "analyst@example.com",
+            "expiry_time": 1795864000000,
+            "scopes": [
+              "sql"
+            ],
+            "last_used_day": 1784632000000
+          }
+        ]
+      }
+    },
+    {
+      "workspace_id": "1003",
+      "workspace_name": "finance-prod",
+      "pricing_tier": "ENTERPRISE",
+      "assignment_read": true,
+      "assigned_policy_id": "finance",
+      "effective_policy_id": "finance",
+      "policy": {
+        "network_policy_id": "finance",
+        "ingress_dry_run": {
+          "public_access": {
+            "restriction_mode": "RESTRICTED_ACCESS",
+            "allow_rules": [
+              {
+                "label": "corp-egress",
+                "origin": {
+                  "included_ip_ranges": {
+                    "ip_ranges": [
+                      "198.51.100.0/24"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "egress": {
+          "network_access": {
+            "restriction_mode": "FULL_ACCESS",
+            "policy_enforcement": {
+              "enforcement_mode": "ENFORCED"
+            }
+          }
+        }
+      },
+      "ip_acl": {
+        "enabled": false,
+        "lists": []
+      },
+      "pas": {
+        "private_access_settings_id": "pas-1",
+        "private_access_settings_name": "pas-fin",
+        "private_access_level": "ACCOUNT",
+        "public_access_enabled": true
+      },
+      "profile": "finance",
+      "pat": {
+        "max_token_lifetime_days": "30",
+        "tokens_enabled": true,
+        "all_users_can_use": false,
+        "tokens": [
+          {
+            "token_id": "tok-1003-1",
+            "created_by_username": "etl-owner@example.com",
+            "expiry_time": -1,
+            "scopes": []
+          },
+          {
+            "token_id": "tok-1003-2",
+            "created_by_username": "analyst@example.com",
+            "expiry_time": 1795864000000,
+            "scopes": [
+              "sql"
+            ],
+            "last_used_day": 1784632000000
+          }
+        ]
+      }
+    },
+    {
+      "workspace_id": "1004",
+      "workspace_name": "ml-prod",
+      "pricing_tier": "ENTERPRISE",
+      "assignment_read": true,
+      "assigned_policy_id": "ml",
+      "effective_policy_id": "ml",
+      "policy": {
+        "network_policy_id": "ml",
+        "ingress": {
+          "public_access": {
+            "restriction_mode": "RESTRICTED_ACCESS",
+            "allow_rules": [
+              {
+                "label": "corp-egress",
+                "origin": {
+                  "included_ip_ranges": {
+                    "ip_ranges": [
+                      "198.51.100.0/24"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "private_access": {
+            "restriction_mode": "RESTRICTED_ACCESS",
+            "allow_rules": [
+              {
+                "label": "own-vpce"
+              }
+            ]
+          }
+        },
+        "egress": {
+          "network_access": {
+            "restriction_mode": "RESTRICTED_ACCESS",
+            "policy_enforcement": {
+              "enforcement_mode": "ENFORCED"
+            }
+          }
+        }
+      },
+      "ip_acl": {
+        "enabled": false,
+        "lists": []
+      },
+      "pas": {
+        "private_access_settings_id": "pas-2",
+        "private_access_level": "ENDPOINT",
+        "public_access_enabled": true
+      },
+      "profile": "ml",
+      "pat": {
+        "max_token_lifetime_days": "30",
+        "tokens_enabled": true,
+        "all_users_can_use": false,
+        "tokens": [
+          {
+            "token_id": "tok-1004-2",
+            "created_by_username": "analyst@example.com",
+            "expiry_time": 1795864000000,
+            "scopes": [
+              "sql"
+            ],
+            "last_used_day": 1784632000000
+          }
+        ]
+      }
+    }
+  ],
+  "sql": {
+    "traffic_by_ip_class": {
+      "rows": [
+        {
+          "workspace_id": "1001",
+          "events": "52000",
+          "public_v4_events": "49000",
+          "ipv6_events": "120",
+          "distinct_public_ips": "412",
+          "distinct_ipv6_ips": "9",
+          "public_principals": "88",
+          "public_pct": "94.2"
+        },
+        {
+          "workspace_id": "1003",
+          "events": "80000",
+          "public_v4_events": "30000",
+          "ipv6_events": "0",
+          "distinct_public_ips": "40",
+          "distinct_ipv6_ips": "0",
+          "public_principals": "20",
+          "public_pct": "37.5"
+        }
+      ]
+    },
+    "principal_network_spread": {
+      "rows": [
+        {
+          "principal": "6f1c2a9e-0000-4000-8000-000000000001",
+          "principal_type": "service_principal",
+          "distinct_public_24s": "57"
+        },
+        {
+          "principal": "alex@example.com",
+          "principal_type": "user",
+          "distinct_public_24s": "14"
+        }
+      ]
+    },
+    "client_families_on_public_ips": {
+      "rows": [
+        {
+          "client_family": "Power BI"
+        },
+        {
+          "client_family": "Browser"
+        },
+        {
+          "client_family": "Tableau"
+        }
+      ]
+    },
+    "dry_run_would_block": {
+      "rows": [
+        {
+          "workspace_id": "1003",
+          "rule_label": null,
+          "source_ip": "203.0.113.9",
+          "authenticated_as": "svc-etl",
+          "events": "340"
+        }
+      ]
+    },
+    "enforced_denials": {
+      "rows": [
+        {
+          "workspace_id": "1004",
+          "day": "2026-11-17",
+          "rule_label": "corp-egress",
+          "denied_events": "57"
+        }
+      ]
+    },
+    "inbound_policy_outcomes": {
+      "rows": []
+    },
+    "account_level_public_access": {
+      "rows": [
+        {
+          "source_ip": "192.0.2.10"
+        },
+        {
+          "source_ip": "192.0.2.11"
+        }
+      ]
+    },
+    "public_browser_vs_api": {
+      "rows": [
+        {
+          "workspace_id": "1001",
+          "programmatic_principals": "7",
+          "browser_pct": "88.0"
+        },
+        {
+          "workspace_id": "1002",
+          "programmatic_principals": "140",
+          "browser_pct": "41.5"
+        }
+      ]
+    },
+    "audit_visibility": {
+      "rows": [
+        {
+          "workspace_id": "1002",
+          "verbose_audit_disabled_events": "1",
+          "last_verbose_audit_disabled": "2026-10-30 14:02:11"
+        }
+      ]
+    },
+    "source_ips_by_workspace": {
+      "rows": [
+        {
+          "workspace_id": "1002",
+          "source_ip": "198.51.100.14",
+          "events": "30000",
+          "principals": "2",
+          "users": "2",
+          "service_principals": "0",
+          "active_days": "88",
+          "first_seen": "2026-08-20",
+          "last_seen": "2026-11-17",
+          "client_families": "[\"Browser\"]",
+          "sample_principals": "[\"alex@example.com\", \"analyst@example.com\"]"
+        },
+        {
+          "workspace_id": "1002",
+          "source_ip": "198.51.100.22",
+          "events": "9000",
+          "principals": "1",
+          "users": "0",
+          "service_principals": "1",
+          "active_days": "80",
+          "first_seen": "2026-08-21",
+          "last_seen": "2026-11-17",
+          "client_families": "[\"Databricks SDK\"]",
+          "sample_principals": "[\"6f1c2a9e-0000-4000-8000-000000000001\"]"
+        },
+        {
+          "workspace_id": "1002",
+          "source_ip": "20.40.1.5",
+          "events": "4200",
+          "principals": "1",
+          "users": "1",
+          "service_principals": "0",
+          "active_days": "85",
+          "first_seen": "2026-08-20",
+          "last_seen": "2026-11-17",
+          "client_families": "[\"Power BI\"]",
+          "sample_principals": "[\"analyst@example.com\"]"
+        },
+        {
+          "workspace_id": "1002",
+          "source_ip": "3.33.0.10",
+          "events": "1500",
+          "principals": "1",
+          "users": "0",
+          "service_principals": "1",
+          "active_days": "89",
+          "first_seen": "2026-08-20",
+          "last_seen": "2026-11-17",
+          "client_families": "[\"Other\"]",
+          "sample_principals": "[\"6f1c2a9e-0000-4000-8000-000000000001\"]"
+        },
+        {
+          "workspace_id": "1002",
+          "source_ip": "34.120.5.6",
+          "events": "2500",
+          "principals": "1",
+          "users": "1",
+          "service_principals": "0",
+          "active_days": "60",
+          "first_seen": "2026-08-25",
+          "last_seen": "2026-11-16",
+          "client_families": "[\"Tableau\"]",
+          "sample_principals": "[\"analyst@example.com\"]"
+        },
+        {
+          "workspace_id": "1002",
+          "source_ip": "165.225.0.10",
+          "events": "2100",
+          "principals": "1",
+          "users": "1",
+          "service_principals": "0",
+          "active_days": "70",
+          "first_seen": "2026-08-22",
+          "last_seen": "2026-11-17",
+          "client_families": "[\"Browser\"]",
+          "sample_principals": "[\"alex@example.com\"]"
+        },
+        {
+          "workspace_id": "1002",
+          "source_ip": "165.225.0.11",
+          "events": "800",
+          "principals": "1",
+          "users": "1",
+          "service_principals": "0",
+          "active_days": "40",
+          "first_seen": "2026-09-01",
+          "last_seen": "2026-11-15",
+          "client_families": "[\"Browser\"]",
+          "sample_principals": "[\"alex@example.com\"]"
+        },
+        {
+          "workspace_id": "1002",
+          "source_ip": "81.2.69.142",
+          "events": "300",
+          "principals": "1",
+          "users": "1",
+          "service_principals": "0",
+          "active_days": "20",
+          "first_seen": "2026-09-10",
+          "last_seen": "2026-11-14",
+          "client_families": "[\"Databricks CLI\"]",
+          "sample_principals": "[\"alex@example.com\"]"
+        },
+        {
+          "workspace_id": "1002",
+          "source_ip": "192.0.2.10",
+          "events": "40",
+          "principals": "1",
+          "users": "1",
+          "service_principals": "0",
+          "active_days": "6",
+          "first_seen": "2026-09-03",
+          "last_seen": "2026-11-02",
+          "client_families": "[\"Unknown\"]",
+          "sample_principals": "[\"etl-owner@example.com\"]"
+        },
+        {
+          "workspace_id": "1002",
+          "source_ip": "192.0.2.20",
+          "events": "5",
+          "principals": "1",
+          "users": "1",
+          "service_principals": "0",
+          "active_days": "2",
+          "first_seen": "2026-10-01",
+          "last_seen": "2026-10-02",
+          "client_families": "[\"Unknown\"]",
+          "sample_principals": "[\"etl-owner@example.com\"]"
+        },
+        {
+          "workspace_id": "1002",
+          "source_ip": "203.0.113.77",
+          "events": "3",
+          "principals": "1",
+          "users": "1",
+          "service_principals": "0",
+          "active_days": "1",
+          "first_seen": "2026-11-03",
+          "last_seen": "2026-11-03",
+          "client_families": "[\"Unknown\"]",
+          "sample_principals": "[\"analyst@example.com\"]"
+        }
+      ]
+    }
+  }
+}

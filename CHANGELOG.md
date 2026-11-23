@@ -13,6 +13,17 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+### Added
+
+- **`cbi-posture` Claude skill.** A read-only CBI posture diagnostic under
+  `.claude/skills/cbi-posture/`. It collects network policies, private access settings, IP access
+  lists, PAT settings and `system.access` traffic, scores each workspace L0 Open → L4 Hardened, maps
+  26 checks to the credential-theft defense layers, and hands each fix to `dbx-nwp-helper` as a
+  propose-only command. Also includes an incident mode, a sample-policy builder that works from
+  `--export` output, a Databricks notebook runner, and a one-step "CBI Security Posture" Genie agent
+  setup. Standalone scripts (stdlib + `databricks-sdk`); no change to the CLI. See
+  `docs/cbi-posture.md`.
+
 ## [0.11.0] - 2026-11-06
 
 ### Added
