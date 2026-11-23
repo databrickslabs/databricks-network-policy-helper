@@ -16,6 +16,7 @@ the write. Auth is the SDK's unified auth (a --profile, DATABRICKS_* env, or OAu
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 
 import typer
@@ -204,6 +205,22 @@ def account_host_from_workspace_host(host: str | None) -> str | None:
         _first, _, rest = h.partition(".")
         if rest:
             return f"https://accounts.{rest}"
+    return _account_host_from_sdk_environments(h)
+
+
+def _account_host_from_sdk_environments(h: str) -> str | None:
+    """Sovereign clouds the patterns above don't cover — AWS GovCloud (`cloud.databricks.us`), Azure
+    Government (`databricks.azure.us`), Azure China (`databricks.azure.cn`) — from the Databricks SDK's
+    own environment table, plus AWS GovCloud DoD (`databricks.mil`), which that table lacks."""
+    if h.endswith(".databricks.mil"):
+        return "https://accounts-dod.cloud.databricks.mil"
+    try:
+        from databricks.sdk.environments import ALL_ENVS
+    except ImportError:  # pragma: no cover - very old SDK
+        return None
+    for env in ALL_ENVS:
+        if h.endswith(env.dns_zone):
+            return env.deployment_url("accounts")
     return None
 
 
@@ -1747,6 +1764,13 @@ def ingress(
         "directory writes <policy-id>.json inside it. Single-policy scopes only. Works in "
         "propose-only mode too.",
     ),
+    review_pack: str = typer.Option(
+        "",
+        help="Also write a review pack for the workspace's owners into this directory: a README with the "
+        "dry-run test plan, exit criteria and rollback, a review sheet (each rule and range with the traffic "
+        "it covers, keep/drop + owner), the observed sources enforcing would block, and a daily dry-run "
+        "check. Single-policy scopes only. Works in propose-only mode.",
+    ),
     disable_existing_ip_acls: bool = typer.Option(
         False,
         help="After creating AND assigning an ENFORCED policy, disable this workspace's existing IP "
@@ -1828,6 +1852,7 @@ def ingress(
         threat_deny_rules=block,
         policy_name=policy_name,
         export=export,
+        review_pack=review_pack.strip(),
         deny_denied_ips=deny_denied_ips,
         select_rules=select_rules,
         disable_existing_ip_acls=disable_existing_ip_acls,
@@ -1847,6 +1872,140 @@ def ingress(
         profile, warehouse_http_path, account_id, account_host, account_profile, warehouse_size.value
     )
     _run_ingress(cfg, conn, yes)
+
+
+@app.command()
+def posture(
+    profile: str | None = typer.Option(None, help="Databricks CLI/config profile (a workspace)."),
+    warehouse_http_path: str | None = typer.Option(
+        None, help="SQL warehouse http_path. If omitted, a serverless warehouse is reused/created."
+    ),
+    warehouse_size: WarehouseSize = typer.Option(
+        WarehouseSize.xsmall,
+        help="Cluster size for the auto-created serverless warehouse (ignored with --warehouse-http-path).",
+    ),
+    lookback_days: int = typer.Option(30, help="Days of system.access audit / inbound_network history."),
+    workspace_id: list[str] = typer.Option(
+        [],
+        "--workspace-id",
+        help="Assess only this workspace (repeatable). Default: every workspace in the account. Traffic "
+        "queries are scoped to the same workspaces plus account level.",
+    ),
+    out: str = typer.Option(
+        "posture",
+        help="Directory for report.md, findings.csv, maturity.csv, tokens-to-revoke.csv, posture.json.",
+    ),
+    skip_traffic: bool = typer.Option(
+        False, help="Skip the system-table queries (no SQL warehouse); score from configuration only."
+    ),
+    stage_schema: str = typer.Option(
+        "",
+        help="Large accounts, one run: build the audit rollup ONCE into a temporary table in this schema "
+        "(catalog.schema), read it for every check, then drop it. Needs CREATE TABLE there; the table "
+        "holds identities and source IPs while the run lasts.",
+    ),
+    uc_schema: str = typer.Option(
+        "",
+        help="Large accounts, repeat runs: persist the audit rollup in this schema as dbx_nwp_posture_daily "
+        "and keep it up to date incrementally (only new days are read on later runs), and append each "
+        "run's results to dbx_nwp_posture_workspaces / _findings / _tokens (for trends and `genie-setup`). "
+        "Needs CREATE TABLE / MODIFY there.",
+    ),
+    refresh_persisted: bool = typer.Option(
+        False, help="With --uc-schema: rebuild dbx_nwp_posture_daily from scratch."
+    ),
+    parallel: int = typer.Option(4, help="Posture queries run at the same time (1 = one after another)."),
+    skip_tokens: bool = typer.Option(
+        False,
+        help="Skip the personal access token checks (they read the --profile workspace's token inventory "
+        "and settings, which needs workspace admin).",
+    ),
+    account_id: str | None = typer.Option(None, help="Databricks account_id (reads network policies)."),
+    account_host: str | None = typer.Option(
+        None, help="Account host. When unset, derived from the workspace's environment."
+    ),
+    account_profile: str | None = typer.Option(
+        None, help="Profile for account-level reads (an account admin). Defaults to unified auth."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Non-interactive mode: skip all prompts."),
+):
+    """Security posture of each workspace: ingress (CBI) scored L0 Open → L4 Hardened, plus personal
+    access tokens worth revoking. Read-only: it changes no policy, setting or token (like `ingress`, it
+    reuses or creates the tool's SQL warehouse unless --warehouse-http-path or --skip-traffic is given;
+    --stage-schema / --uc-schema write only the rollup tables named there)."""
+    bad = [w for w in workspace_id if not str(w).strip().isdigit()]
+    if bad:
+        raise typer.BadParameter(f"--workspace-id must be numeric: {bad}")
+    if lookback_days < 1:
+        raise typer.BadParameter("--lookback-days must be at least 1.")
+    if not 1 <= parallel <= 8:
+        raise typer.BadParameter("--parallel must be between 1 and 8.")
+    if stage_schema and uc_schema:
+        raise typer.BadParameter("Pass --stage-schema OR --uc-schema, not both.")
+    if refresh_persisted and not uc_schema:
+        raise typer.BadParameter(
+            "--refresh-persisted only applies together with --uc-schema <catalog.schema>."
+        )
+    try:
+        validate_uc_schema(uc_schema.strip())
+        validate_uc_schema(stage_schema.strip())
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from None
+    conn = _conn(
+        profile, warehouse_http_path, account_id, account_host, account_profile, warehouse_size.value
+    )
+    opts = PostureOptions(
+        lookback_days=lookback_days,
+        only_ws={w.strip() for w in workspace_id},
+        out=out,
+        parallel=parallel,
+        refresh_persisted=refresh_persisted,
+        skip_tokens=skip_tokens,
+        skip_traffic=skip_traffic,
+        stage_schema=stage_schema.strip(),
+        uc_schema=uc_schema.strip(),
+    )
+    _run_posture(conn, opts, yes)
+
+
+@app.command("genie-setup")
+def genie_setup(
+    uc_schema: str = typer.Option(
+        ...,
+        help="The catalog.schema `posture --uc-schema` wrote to. The agent reads its tables, plus any "
+        "ingress / egress tables persisted there.",
+    ),
+    profile: str | None = typer.Option(None, help="Databricks CLI/config profile (a workspace)."),
+    warehouse_http_path: str | None = typer.Option(
+        None,
+        help="SQL warehouse (serverless or Pro) the agent runs on. If omitted, the tool's serverless "
+        "warehouse is reused/created.",
+    ),
+    warehouse_size: WarehouseSize = typer.Option(
+        WarehouseSize.xsmall, help="Cluster size if the serverless warehouse has to be created."
+    ),
+    title: str = typer.Option(
+        "Databricks Security Posture", help="Agent title; an agent with it is updated."
+    ),
+    parent_path: str | None = typer.Option(
+        None, help="Workspace folder for a new agent (default: your home)."
+    ),
+    new: bool = typer.Option(False, help="Always create a new agent, even if one has this title."),
+    print_only: str = typer.Option(
+        "", help="Write the agent definition to this JSON file and change nothing (no views, no agent)."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Non-interactive: skip the confirmation."),
+):
+    """Create (or update) a Genie agent over the posture tables, for questions in plain English. Writes
+    views in --uc-schema and one Genie space; never shares it or changes policies, settings or tokens."""
+    try:
+        validate_uc_schema(uc_schema.strip())
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from None
+    if not uc_schema.strip():
+        raise typer.BadParameter("--uc-schema is required (the schema `posture --uc-schema` wrote to).")
+    conn = _conn(profile, warehouse_http_path, None, None, None, warehouse_size.value)
+    _run_genie_setup(conn, uc_schema.strip(), title, parent_path, new, print_only, yes)
 
 
 @app.command()
@@ -2283,6 +2442,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         )
         validate_policy_name(cfg.policy_name, cfg.policy_scope, cfg.apply.policy_action)
         validate_export(cfg.export, cfg.policy_scope)
+        validate_export(cfg.review_pack, cfg.policy_scope, flag="--review-pack")
         validate_uc_schema(cfg.uc_schema)
         validate_limits(cfg.max_rules, cfg.max_cidrs)
     except ValueError as e:
@@ -2409,6 +2569,11 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
             _export_policy(cfg.export, payload, yes)
         else:
             console.banner("warn", "Nothing to export — the analysis produced no ingress rules.")
+    if cfg.review_pack:
+        if previews:
+            _write_review_pack(cfg, conn, account, http_path, analysis, policies, existing_ingress[3], yes)
+        else:
+            console.banner("warn", "No review pack — the analysis produced no ingress rules.")
 
     if not cfg.apply.create_policy:
         _persist_suggestions(conn, http_path, analysis, cfg, policies, suggestion_rows_full, this_ws, False)
@@ -2469,6 +2634,244 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     render.apply_results(results, conn.account_host, conn.account_id)
     _maybe_disable_ip_acls(cfg.disable_existing_ip_acls, results, wc)
     _persist_suggestions(conn, http_path, analysis, cfg, policies, suggestion_rows_full, this_ws, True)
+
+
+@dataclass
+class PostureOptions:
+    lookback_days: int
+    only_ws: set[str]
+    out: str
+    parallel: int = 4
+    refresh_persisted: bool = False
+    skip_tokens: bool = False
+    skip_traffic: bool = False
+    stage_schema: str = ""
+    uc_schema: str = ""
+
+
+def _run_posture(conn: Connection, opts: PostureOptions, yes: bool) -> None:
+    """Collect → evaluate → report. Account and workspace reads are list/get calls; the traffic checks
+    are SELECTs (plus the rollup table under --stage-schema / --uc-schema)."""
+    import datetime as dt
+
+    from . import auth, sql
+    from .core import posture, posture_report, tokens
+
+    lookback_days, only_ws = opts.lookback_days, opts.only_ws
+    console.title_panel(
+        "Security posture",
+        "Read-only: where each workspace stands on ingress (CBI) and personal access tokens, and the "
+        "next step.",
+    )
+    wc = _confirm_workspace(conn, yes)
+    _resolve_account_host(conn, wc)
+    _default_account_id_from_workspace(conn, wc)
+    _ensure_account_id(conn, "Reading the account's network policies")
+    this_ws = auth.this_workspace_id(conn)
+    account = _account_client_or_exit(conn, workspace_id=this_ws)
+
+    snap: dict = {
+        "generated_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+        "lookback_days": lookback_days,
+        "workspace_profile": conn.profile,
+    }
+    with console.status("Reading network policies, assignments and Private Access Settings…"):
+        snap["account"], snap["workspaces"] = posture.collect_account(
+            account, only_ws or None, note=_step, fallback_workspace_id=this_ws
+        )
+    mine = next((w for w in snap["workspaces"] if w["workspace_id"] == str(this_ws)), None)
+    if mine is not None:
+        mine["profile"] = conn.profile
+        mine["ip_acl"] = posture.collect_workspace_ip_acl(wc)
+        if not opts.skip_tokens:
+            with console.status("Reading the workspace's personal access tokens (metadata only)…"):
+                mine["pat"] = tokens.collect(wc)
+    notes = []
+    if len(snap["workspaces"]) > 1:
+        notes.append(
+            "IP access lists and tokens are read per workspace, so only this profile's workspace "
+            f"({this_ws}) has them; re-run with another workspace's --profile to cover it too."
+        )
+    if opts.skip_tokens:
+        notes.append("--skip-tokens: personal access tokens weren't checked.")
+    if opts.skip_traffic:
+        snap["sql"] = {}
+        notes.append("--skip-traffic: no system-table queries ran; traffic-based checks are absent.")
+    else:
+        http_path = sql.resolve_warehouse(conn)
+        mode = (
+            f"persisted rollup in {opts.uc_schema}"
+            if opts.uc_schema
+            else f"one-scan rollup staged in {opts.stage_schema}" if opts.stage_schema else "direct queries"
+        )
+        console.banner("info", f"Traffic checks: {mode}, {opts.parallel} at a time.")
+        with console.status("Running the posture queries…"):
+            snap["sql"] = _run_analysis(
+                lambda: posture.run_sql(
+                    lambda: sql.connection(conn, http_path),
+                    lookback_days,
+                    only_ws or None,
+                    uc_schema=opts.uc_schema,
+                    stage_schema=opts.stage_schema,
+                    refresh=opts.refresh_persisted,
+                    parallel=opts.parallel,
+                    note=_step,
+                )
+            )
+    snap["collection_notes"] = notes
+
+    findings, maturity = posture.evaluate(snap)
+    posture.finalize_levels(findings, maturity)
+    if opts.uc_schema:
+        # Append this run's results so they can be tracked over time (and read by `genie-setup`).
+        from .core import persist
+
+        with sql.connection(conn, sql.resolve_warehouse(conn)) as sconn:
+            persist.write_posture_snapshot(sconn, opts.uc_schema, snap, findings, maturity, note=_step)
+    render.posture(snap, findings, maturity)
+    report = posture_report.write(opts.out, snap, findings, maturity)
+    for n in notes:
+        console.banner("info", n)
+    console.banner(
+        "success",
+        f"Report written to {report} (plus findings.csv, maturity.csv, tokens-to-revoke.csv, posture.json).",
+    )
+    console.banner(
+        "info",
+        "Read-only run: no policy, assignment, setting or token was changed. Each finding names its "
+        "propose-only next step.",
+    )
+
+
+def _write_review_pack(
+    cfg, conn: Connection, account, http_path, analysis, policies, assigned_id, yes: bool = False
+) -> None:
+    """`--review-pack`: the proposal as a test plan + review sheet for the owners. Writes local files
+    only (asking before it overwrites an existing pack, like --export); best-effort reads the assigned
+    policy's egress so the pack can warn before a hand-apply would open it."""
+    from pathlib import Path
+
+    from . import auth
+    from .core import acl, review_pack
+    from .core import ingress_rules as rules
+
+    if not _confirm_overwrite(Path(cfg.review_pack) / "README.md", yes):
+        console.banner("info", f"Review pack not written — '{cfg.review_pack}' was left as it is.")
+        return
+    this_ws = auth.this_workspace_id(conn)
+    payload = rules.export_payload(policies, cfg, conn.account_id or "", this_ws, profile=conn.profile)
+    egress_restrictive = False
+    if account is not None and assigned_id:
+        _pid, pol, _err = acl.assigned_policy_state(account, this_ws, retries=0)
+        egress_restrictive = acl.egress_restrictive(getattr(pol, "egress", None))
+    partner = {s["label"] for p in policies.values() for s in p["allow"] if s.get("partner")}
+    ctx = review_pack.Context(
+        workspace_id=str(this_ws),
+        cfg=cfg,
+        profile=conn.profile,
+        warehouse_http_path=http_path,
+        assigned_policy_id=assigned_id,
+        existing_egress_restrictive=egress_restrictive,
+        acl_labels={str(a.get("label") or "").lower() for a in analysis.ip_acls},
+        partner_labels=partner,
+    )
+    summary = review_pack.write(cfg.review_pack, payload, analysis.candidates, ctx)
+    console.banner(
+        "success",
+        f"Review pack written to {summary['dir']}: {summary['ranges']} rule range(s), {summary['flagged']} "
+        f"flagged, {summary['uncovered_sources']} uncovered source(s), {summary['warnings']} warning(s).",
+    )
+
+
+def _run_genie_setup(conn, uc_schema, title, parent_path, new, print_only, yes) -> None:
+    import json
+    import sys
+    from pathlib import Path
+
+    from . import sql
+    from .core import genie
+    from .core.persist import _quote
+
+    console.title_panel("Security posture Genie agent", f"Over the tables in {uc_schema}.")
+    wc = _confirm_workspace(conn, yes)
+    catalog, schema = uc_schema.rsplit(".", 1)
+    prefix = f"{_quote(catalog)}.{_quote(schema)}"
+    http_path = sql.resolve_warehouse(conn)
+    warehouse_id = http_path.rstrip("/").rsplit("/", 1)[-1]
+    with sql.connection(conn, http_path) as sconn:
+        shown = sql.query(sconn, f"SHOW TABLES IN {prefix}")
+        col = "tableName" if "tableName" in shown.columns else shown.columns[1]
+        have = {str(t).lower() for t in shown[col]}
+        missing = [t for t in genie.REQUIRED if t not in have]
+        if missing:
+            console.banner(
+                "danger",
+                f"{uc_schema} has no {', '.join(missing)}. Run `dbx-nwp-helper posture --uc-schema "
+                f"{uc_schema}` "
+                "once first (it writes the posture snapshots this agent reads), then re-run genie-setup.",
+            )
+            raise typer.Exit(code=1)
+        views = genie.view_statements(prefix, have)
+        sources = (have | {v for v, _ in views}) & set(genie.SOURCES)
+        if print_only:
+            Path(print_only).write_text(json.dumps(genie.build_space(prefix, sources), indent=2))
+            console.banner("success", f"Wrote the agent definition to {print_only}. Nothing was changed.")
+            return
+        console.banner(
+            "warn",
+            f"This creates or replaces {len(views)} view(s) in {uc_schema} and "
+            f"{'creates' if new else 'creates or updates'} the Genie agent '{title}' on warehouse "
+            f"{warehouse_id}. Nothing is shared, and no policy, setting or token changes.",
+        )
+        if not yes:
+            if not sys.stdin.isatty():
+                raise typer.BadParameter("genie-setup writes views and a Genie agent: pass --yes to run it.")
+            if not typer.confirm(typer.style("Continue?", fg="yellow"), default=False):
+                console.banner("info", "Aborted — nothing was written.")
+                raise typer.Exit(code=0)
+        made = []
+        for view, stmt in views:
+            try:
+                sql.execute(sconn, stmt)
+                made.append(view)
+            except Exception as e:  # noqa: BLE001 - inbound_network may be absent; the agent goes without it
+                if view != genie.INBOUND_VIEW:
+                    raise
+                console.banner(
+                    "info",
+                    f"Skipped {view}: system.access.inbound_network isn't readable ({type(e).__name__}).",
+                )
+        sources = (have | set(made)) & set(genie.SOURCES)
+    existing = None if new else genie.find_existing(wc, title)
+    try:
+        res = genie.send(wc, genie.build_space(prefix, sources), warehouse_id, title, existing, parent_path)
+    except Exception as e:  # noqa: BLE001 - narrow: only a rejected parameter block is retried
+        if "param" not in str(e).lower():
+            raise
+        console.banner(
+            "info", "Example-query parameters were rejected; retrying with lookback_days fixed at 30."
+        )
+        res = genie.send(
+            wc,
+            genie.build_space(prefix, sources, inline_params=True),
+            warehouse_id,
+            title,
+            existing,
+            parent_path,
+        )
+    sid = getattr(res, "space_id", None) or (existing.space_id if existing else "")
+    url = f"{(wc.config.host or '').rstrip('/')}/genie/rooms/{sid}"
+    console.banner(
+        "success",
+        f"{'Updated' if existing else 'Created'} Genie agent '{title}' ({len(sources)} data source(s), "
+        f"{len(made)} view(s)): {url}",
+    )
+    console.banner(
+        "info",
+        "Not shared with anyone. Share it (CAN RUN); viewers also need SELECT on the schema's tables and "
+        "views, because Genie runs queries as the person asking. Re-run `posture --uc-schema` on a schedule "
+        "to keep the answers current.",
+    )
 
 
 def _persist_suggestions(

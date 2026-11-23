@@ -1,0 +1,15 @@
+- What does our security posture look like?
+- What is our CBI maturity by workspace?
+- Which workspaces are still open to the internet?
+- What are the high-severity findings and what should we do first?
+- Which personal access tokens should we revoke, and who owns them?
+- How exposed are we to stolen personal access tokens?
+- How much traffic to each workspace comes from public IPs?
+- Which public IPs would an allow-list need to cover?
+- Which service principals connect from more than 10 networks?
+- Do we have Power BI or Tableau traffic over the public internet?
+- What would break if we enforced our dry-run policy?
+- What did our enforced policy block recently, and which rule blocked it?
+- Who reaches the account console from the internet?
+- How has our maturity changed since last month?
+- Which identities showed up from a new IP address yesterday?

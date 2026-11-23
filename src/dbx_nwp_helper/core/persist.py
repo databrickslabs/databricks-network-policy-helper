@@ -73,6 +73,22 @@ def tables(uc_schema: str) -> PersistedSource:
     )
 
 
+def posture_table(uc_schema: str) -> str:
+    """`--uc-schema` → the persisted posture rollup table (see queries.posture_daily_table_ddl)."""
+    from ..config import UC_POSTURE_DAILY_TABLE
+
+    catalog, schema = uc_schema.strip().rsplit(".", 1)
+    return f"{_quote(catalog)}.{_quote(schema)}.{_quote(UC_POSTURE_DAILY_TABLE)}"
+
+
+def posture_stage_table(stage_schema: str) -> str:
+    """`--stage-schema` → a per-run temporary table name for the posture rollup."""
+    from ..config import UC_POSTURE_STAGE_PREFIX
+
+    catalog, schema = stage_schema.strip().rsplit(".", 1)
+    return f"{_quote(catalog)}.{_quote(schema)}.{_quote(UC_POSTURE_STAGE_PREFIX + uuid.uuid4().hex[:12])}"
+
+
 def ensure_tables(sql_conn, src: PersistedSource, direction: str = "ingress") -> None:
     """Create the direction's two tables if they don't exist yet."""
     from .. import queries, sql
@@ -467,3 +483,172 @@ def write_egress_suggestions(
     ]
     _insert_rows(sql_conn, src.egress_suggestions_table, cols, value_rows)
     return run_id
+
+
+# ------------------------------------------------------------------------------ posture snapshots
+def posture_snapshot_tables(uc_schema: str) -> dict[str, str]:
+    """`--uc-schema` → {"findings" | "tokens" | "workspaces": quoted table name}."""
+    from ..config import UC_POSTURE_FINDINGS_TABLE, UC_POSTURE_TOKENS_TABLE, UC_POSTURE_WORKSPACES_TABLE
+
+    catalog, schema = uc_schema.strip().rsplit(".", 1)
+    prefix = f"{_quote(catalog)}.{_quote(schema)}"
+    return {
+        "findings": f"{prefix}.{_quote(UC_POSTURE_FINDINGS_TABLE)}",
+        "tokens": f"{prefix}.{_quote(UC_POSTURE_TOKENS_TABLE)}",
+        "workspaces": f"{prefix}.{_quote(UC_POSTURE_WORKSPACES_TABLE)}",
+    }
+
+
+def posture_workspace_rows(snap: dict, maturity: dict) -> list[dict]:
+    """One row per assessed workspace for dbx_nwp_posture_workspaces."""
+    from . import tokens
+    from .posture import summarise_policy
+
+    today = _as_date(str(snap.get("generated_at") or "")[:10]) or dt.date.today()
+    rows = []
+    for ws in snap.get("workspaces") or []:
+        wid = str(ws["workspace_id"])
+        m = maturity.get(wid, {})
+        s = summarise_policy(ws.get("policy"))
+        pas, acl, pat = ws.get("pas") or {}, ws.get("ip_acl"), ws.get("pat")
+        ts = tokens.summarise(pat, today, tokens.TokenThresholds()) or {}
+        try:
+            mtl = int(pat["max_token_lifetime_days"]) if pat and pat.get("max_token_lifetime_days") else None
+        except (TypeError, ValueError):
+            mtl = None
+        rows.append(
+            {
+                "effective_policy_id": ws.get("effective_policy_id"),
+                "egress_restricted": s["egress_restrictive"],
+                "has_private_link": pas.get("private_access_level") is not None,
+                "ip_acl_checked": acl is not None,
+                "ip_acl_enabled": (
+                    None
+                    if acl is None
+                    else any(a.get("enabled") and a.get("list_type") == "ALLOW" for a in acl)
+                ),
+                "lookback_days": snap.get("lookback_days"),
+                "maturity_label": m.get("label"),
+                "maturity_level": m.get("level"),
+                "maturity_reason": m.get("why"),
+                "max_token_lifetime_days": mtl,
+                "pas_public_access_enabled": pas.get("public_access_enabled") if pas else None,
+                "pats_all_users": (pat or {}).get("all_users_can_use"),
+                "pats_checked": bool(ts),
+                "pats_never_expire": ts.get("never_expire"),
+                "pats_total": ts.get("total"),
+                "pats_unscoped": ts.get("unscoped"),
+                "policy_mode": "unknown" if ws.get("policy_error") else s["mode"] or "open",
+                "pricing_tier": ws.get("pricing_tier"),
+                "private_restriction": s["private"]["restriction_mode"],
+                "public_allow_rules": s["public"]["allow_rules"],
+                "public_cidrs": len(s["public"]["cidrs"]),
+                "public_restriction": s["public"]["restriction_mode"],
+                "workspace_id": wid,
+                "workspace_name": ws.get("workspace_name"),
+            }
+        )
+    return rows
+
+
+_POSTURE_WORKSPACE_COLS = [
+    "lookback_days",
+    "workspace_id",
+    "workspace_name",
+    "pricing_tier",
+    "effective_policy_id",
+    "policy_mode",
+    "public_restriction",
+    "public_allow_rules",
+    "public_cidrs",
+    "private_restriction",
+    "has_private_link",
+    "pas_public_access_enabled",
+    "ip_acl_checked",
+    "ip_acl_enabled",
+    "egress_restricted",
+    "maturity_level",
+    "maturity_label",
+    "maturity_reason",
+    "pats_checked",
+    "pats_total",
+    "pats_never_expire",
+    "pats_unscoped",
+    "max_token_lifetime_days",
+    "pats_all_users",
+]
+_POSTURE_FINDING_COLS = [
+    "workspace_id",
+    "finding_id",
+    "severity",
+    "title",
+    "detail",
+    "recommendation",
+    "next_step",
+    "docs",
+]
+_POSTURE_TOKEN_COLS = [
+    "workspace_id",
+    "token_id",
+    "owner",
+    "created",
+    "expires",
+    "last_used",
+    "scopes",
+    "reasons",
+]
+
+
+def write_posture_snapshot(sql_conn, uc_schema: str, snap: dict, findings, maturity: dict, note: Note) -> str:
+    """Append this posture run to the three snapshot tables (created if missing). Returns the run id."""
+    from .. import queries
+    from .posture_report import token_rows
+
+    t = posture_snapshot_tables(uc_schema)
+    for key, ddl in (
+        ("findings", queries.posture_findings_table_ddl),
+        ("tokens", queries.posture_tokens_table_ddl),
+        ("workspaces", queries.posture_workspaces_table_ddl),
+    ):
+        _execute(sql_conn, ddl(t[key]))
+    run_id = uuid.uuid4().hex[:12]
+    run_at = f"TIMESTAMP {_lit(str(snap.get('generated_at') or '')[:19].replace('T', ' '))}"
+    head = [_lit(run_id), run_at]
+
+    def date_or_null(v):
+        return f"DATE {_lit(v)}" if v and v != "never" else "NULL"
+
+    ws_rows = [
+        head + [_lit(r[c]) for c in _POSTURE_WORKSPACE_COLS] for r in posture_workspace_rows(snap, maturity)
+    ]
+    f_rows = [
+        head
+        + [_lit(v) for v in (f.workspace_id, f.id, f.severity, f.title, f.detail, f.recommendation)]
+        + [_lit(f.next_step), _lit(f.docs)]
+        for f in findings
+    ]
+    tok_rows = [
+        head
+        + [_lit(r["workspace_id"]), _lit(r["token_id"]), _lit(r["owner"])]
+        + [date_or_null(r["created"]), _lit(r["expires"]), date_or_null(r["last_used"])]
+        + [_lit(r["scopes"]), _lit(r["reasons"])]
+        for r in token_rows(snap)
+    ]
+    for key, cols, rows in (
+        ("workspaces", _POSTURE_WORKSPACE_COLS, ws_rows),
+        ("findings", _POSTURE_FINDING_COLS, f_rows),
+        ("tokens", _POSTURE_TOKEN_COLS, tok_rows),
+    ):
+        if rows:
+            _insert_rows(sql_conn, t[key], ", ".join(["run_id", "run_at", *cols]), rows)
+    note(
+        f"Appended posture run {run_id} to {uc_schema}: {len(ws_rows)} workspace(s), {len(f_rows)} "
+        f"finding(s), {len(tok_rows)} token(s) to review."
+    )
+    return run_id
+
+
+def _execute(sql_conn, stmt: str) -> None:
+    from .. import sql
+
+    sql.execute(sql_conn, stmt)

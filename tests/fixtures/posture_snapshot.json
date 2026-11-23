@@ -1,0 +1,315 @@
+{
+  "account": {
+    "account_policy": {
+      "ingress": {
+        "public_access": {
+          "restriction_mode": "FULL_ACCESS"
+        }
+      },
+      "network_policy_id": "account-policy"
+    },
+    "policies_read": true
+  },
+  "generated_at": "2026-11-18 06:00:00",
+  "lookback_days": 30,
+  "sql": {
+    "account_level_public_access": {
+      "rows": [
+        {
+          "source_ip": "192.0.2.10"
+        },
+        {
+          "source_ip": "192.0.2.11"
+        }
+      ]
+    },
+    "audit_visibility": {
+      "rows": [
+        {
+          "last_verbose_audit_disabled": "2026-10-30 14:02:11",
+          "verbose_audit_disabled_events": "1",
+          "workspace_id": "1002"
+        }
+      ]
+    },
+    "client_families_on_public_ips": {
+      "rows": [
+        {
+          "client_family": "Power BI"
+        },
+        {
+          "client_family": "Browser"
+        },
+        {
+          "client_family": "Tableau"
+        }
+      ]
+    },
+    "inbound_policy_outcomes": {
+      "rows": [
+        {
+          "combinations": 1,
+          "distinct_source_ips": 1,
+          "events": 340,
+          "identities": 1,
+          "policy_outcome": "DRY_RUN_DENIAL",
+          "workspace_id": "1003"
+        },
+        {
+          "combinations": 0,
+          "distinct_source_ips": 1,
+          "events": 57,
+          "identities": 0,
+          "policy_outcome": "DENIED",
+          "workspace_id": "1004"
+        }
+      ]
+    },
+    "new_source_identity_pairs": {
+      "rows": []
+    },
+    "principal_network_spread": {
+      "rows": [
+        {
+          "distinct_public_24s": "57",
+          "principal": "6f1c2a9e-0000-4000-8000-000000000001",
+          "principal_type": "service_principal"
+        },
+        {
+          "distinct_public_24s": "14",
+          "principal": "alex@example.com",
+          "principal_type": "user"
+        }
+      ]
+    },
+    "public_browser_vs_api": {
+      "rows": [
+        {
+          "browser_pct": "88.0",
+          "programmatic_principals": "7",
+          "workspace_id": "1001"
+        },
+        {
+          "browser_pct": "41.5",
+          "programmatic_principals": "140",
+          "workspace_id": "1002"
+        }
+      ]
+    },
+    "traffic_by_ip_class": {
+      "rows": [
+        {
+          "distinct_ipv6_ips": "9",
+          "distinct_public_ips": "412",
+          "events": "52000",
+          "ipv6_events": "120",
+          "public_pct": "94.2",
+          "public_principals": "88",
+          "public_v4_events": "49000",
+          "workspace_id": "1001"
+        },
+        {
+          "distinct_ipv6_ips": "0",
+          "distinct_public_ips": "40",
+          "events": "80000",
+          "ipv6_events": "0",
+          "public_pct": "37.5",
+          "public_principals": "20",
+          "public_v4_events": "30000",
+          "workspace_id": "1003"
+        }
+      ]
+    }
+  },
+  "workspace_profile": "dev",
+  "workspaces": [
+    {
+      "assigned_policy_id": null,
+      "assignment_read": true,
+      "effective_policy_id": "default-policy",
+      "ip_acl": [],
+      "pas": null,
+      "policy": {
+        "egress": {
+          "network_access": {
+            "restriction_mode": "FULL_ACCESS"
+          }
+        },
+        "ingress": {
+          "public_access": {
+            "restriction_mode": "FULL_ACCESS"
+          }
+        },
+        "network_policy_id": "default-policy"
+      },
+      "pricing_tier": "ENTERPRISE",
+      "profile": "dev",
+      "workspace_id": "1001",
+      "workspace_name": "sandbox-dev"
+    },
+    {
+      "assigned_policy_id": null,
+      "assignment_read": true,
+      "effective_policy_id": "default-policy",
+      "ip_acl": [
+        {
+          "enabled": true,
+          "ip_addresses": [
+            "198.51.100.0/24",
+            "52.0.0.0/8"
+          ],
+          "label": "corp",
+          "list_type": "ALLOW"
+        }
+      ],
+      "pas": null,
+      "pat": {
+        "all_users_can_use": true,
+        "max_token_lifetime_days": "",
+        "tokens": [
+          {
+            "created_by_username": "etl-owner@example.com",
+            "creation_time": 1760440000000,
+            "expiry_time": -1,
+            "last_used_day": 1794913600000,
+            "scopes": [],
+            "token_id": "0a1b2c3d4e5f"
+          },
+          {
+            "created_by_username": "analyst@example.com",
+            "creation_time": 1769080000000,
+            "expiry_time": 1800184000000,
+            "last_used_day": 1782040000000,
+            "scopes": [
+              "sql"
+            ],
+            "token_id": "1b2c3d4e5f6a"
+          },
+          {
+            "created_by_username": "bob@example.com",
+            "creation_time": 1794827200000,
+            "expiry_time": 1795432000000,
+            "last_used_day": 1794913600000,
+            "scopes": [
+              "sql"
+            ],
+            "token_id": "2c3d4e5f6a7b"
+          }
+        ],
+        "tokens_enabled": true
+      },
+      "policy": {
+        "egress": {
+          "network_access": {
+            "restriction_mode": "FULL_ACCESS"
+          }
+        },
+        "ingress": {
+          "public_access": {
+            "restriction_mode": "FULL_ACCESS"
+          }
+        },
+        "network_policy_id": "default-policy"
+      },
+      "pricing_tier": "ENTERPRISE",
+      "profile": "analytics",
+      "workspace_id": "1002",
+      "workspace_name": "analytics-prod"
+    },
+    {
+      "assigned_policy_id": "finance",
+      "assignment_read": true,
+      "effective_policy_id": "finance",
+      "ip_acl": [],
+      "pas": {
+        "private_access_level": "ACCOUNT",
+        "private_access_settings_id": "pas-1",
+        "private_access_settings_name": "pas-fin",
+        "public_access_enabled": true
+      },
+      "policy": {
+        "egress": {
+          "network_access": {
+            "policy_enforcement": {
+              "enforcement_mode": "ENFORCED"
+            },
+            "restriction_mode": "FULL_ACCESS"
+          }
+        },
+        "ingress_dry_run": {
+          "public_access": {
+            "allow_rules": [
+              {
+                "label": "corp-egress",
+                "origin": {
+                  "included_ip_ranges": {
+                    "ip_ranges": [
+                      "198.51.100.0/24"
+                    ]
+                  }
+                }
+              }
+            ],
+            "restriction_mode": "RESTRICTED_ACCESS"
+          }
+        },
+        "network_policy_id": "finance"
+      },
+      "pricing_tier": "ENTERPRISE",
+      "profile": "finance",
+      "workspace_id": "1003",
+      "workspace_name": "finance-prod"
+    },
+    {
+      "assigned_policy_id": "ml",
+      "assignment_read": true,
+      "effective_policy_id": "ml",
+      "ip_acl": [],
+      "pas": {
+        "private_access_level": "ENDPOINT",
+        "private_access_settings_id": "pas-2",
+        "public_access_enabled": true
+      },
+      "policy": {
+        "egress": {
+          "network_access": {
+            "policy_enforcement": {
+              "enforcement_mode": "ENFORCED"
+            },
+            "restriction_mode": "RESTRICTED_ACCESS"
+          }
+        },
+        "ingress": {
+          "private_access": {
+            "allow_rules": [
+              {
+                "label": "own-vpce"
+              }
+            ],
+            "restriction_mode": "RESTRICTED_ACCESS"
+          },
+          "public_access": {
+            "allow_rules": [
+              {
+                "label": "corp-egress",
+                "origin": {
+                  "included_ip_ranges": {
+                    "ip_ranges": [
+                      "198.51.100.0/24"
+                    ]
+                  }
+                }
+              }
+            ],
+            "restriction_mode": "RESTRICTED_ACCESS"
+          }
+        },
+        "network_policy_id": "ml"
+      },
+      "pricing_tier": "ENTERPRISE",
+      "profile": "ml",
+      "workspace_id": "1004",
+      "workspace_name": "ml-prod"
+    }
+  ]
+}

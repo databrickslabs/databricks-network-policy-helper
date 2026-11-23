@@ -13,6 +13,48 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+### Added
+
+- **`posture` command.** A read-only security posture of each workspace before anything is changed.
+  *Ingress:* reads every network policy, assignment and Private Access Settings in the account, the
+  `--profile` workspace's IP access lists and `system.access` traffic, scores each workspace **L0 Open →
+  L4 Hardened**, and reports findings (open-in-effect allow rules, dry-run gaps, enforced denials, broad
+  CIDRs, PrivateLink allow-all endpoints, the account policy, near-limit policies, roaming principals,
+  SaaS clients, verbose-audit gaps, a suggested no-VPN rollout pattern), each with its propose-only
+  `ingress` command. It reuses the ingress engine's definitions: the audit projection and private-range
+  filter, `core/acl`'s active-block and restrictive tests, the PAS / assigned-policy readers and the
+  policy caps. *Tokens:* never-expiring, long-lived, unscoped and unused PATs, the lifetime policy and
+  who may create tokens; `tokens-to-revoke.csv` lists the tokens worth revoking with their owners and
+  the command to run (nothing is revoked). Writes `report.md`, `findings.csv`, `maturity.csv`,
+  `tokens-to-revoke.csv` and `posture.json`.
+- **Posture on large audit logs.** The audit checks read one rollup of `system.access.audit` (per day,
+  workspace, source IP, principal, client family, outcome), built per check (default),
+  **once per run** into a temporary table (`--stage-schema`), or persisted and synced incrementally as
+  `dbx_nwp_posture_daily` (`--uc-schema`, `--refresh-persisted`). Queries run `--parallel 4` at a time,
+  each on its own connection. `--skip-traffic` and `--skip-tokens` skip those parts.
+- **`genie-setup` command.** Creates (or updates in place) a Genie agent over the posture tables in a
+  `--uc-schema`, plus any `ingress` / `egress` tables persisted there, for questions in plain English
+  ("which tokens should we revoke?", "what would break if we enforced?"). It creates the `*_latest`
+  views and a `dbx_nwp_inbound_events` view, builds the agent from `src/dbx_nwp_helper/genie/`
+  (instructions, trusted queries over the daily rollup, sample questions), and leaves out example
+  queries whose tables aren't there. It never shares the agent. `--print-only` writes the definition
+  and changes nothing; non-interactive runs need `--yes`.
+- **Posture snapshots.** `posture --uc-schema` also appends each run to `dbx_nwp_posture_workspaces`,
+  `dbx_nwp_posture_findings` and `dbx_nwp_posture_tokens` (one batch per `run_id`), for trends and the
+  Genie agent.
+- **`ingress --review-pack <dir>`.** Writes the proposal as a pack for the workspace's owners to
+  review and test: a README (warnings, dry-run test plan, exit criteria, rollback, sign-off), a review
+  sheet with the traffic each rule and range covers, the observed sources enforcing would block, a
+  daily dry-run check and the policy body. Propose-only friendly; single-policy scopes.
+- **`posture-helper` skill**, plus `ingress-helper` references for CBI concepts, no-VPN rollout patterns,
+  incident mode and manual CLI checks.
+
+### Changed
+
+- The account host is now also derived for AWS GovCloud (and DoD), Azure Government and Azure China
+  workspaces, from the Databricks SDK's environment table, instead of falling back to the AWS
+  commercial default.
+
 ## [0.11.0] - 2026-11-06
 
 ### Added

@@ -1504,6 +1504,11 @@ def test_account_host_from_workspace_host():
     assert f("https://acme.gcp.databricks.com") == "https://accounts.gcp.databricks.com"
     # Azure fixed host (region label must NOT leak in)
     assert f("https://adb-0000000000000000.0.azuredatabricks.net") == "https://accounts.azuredatabricks.net"
+    # sovereign clouds, from the SDK's environment table (+ DoD, which it lacks)
+    assert f("https://dbc-1.cloud.databricks.us") == "https://accounts.cloud.databricks.us"
+    assert f("https://adb-1.2.databricks.azure.us") == "https://accounts.databricks.azure.us"
+    assert f("https://adb-1.2.databricks.azure.cn") == "https://accounts.databricks.azure.cn"
+    assert f("https://dbc-1.cloud.databricks.mil") == "https://accounts-dod.cloud.databricks.mil"
     # undecidable / empty -> None (caller keeps its default; user can pin --account-host)
     assert f("https://databricks.acme.example") is None
     assert f("") is None and f(None) is None
