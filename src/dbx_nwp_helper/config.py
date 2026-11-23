@@ -45,6 +45,8 @@ UC_DAILY_TABLE = "dbx_nwp_ingress_daily"
 UC_SUGGESTIONS_TABLE = "dbx_nwp_ingress_suggestions"
 UC_EGRESS_DAILY_TABLE = "dbx_nwp_egress_daily"
 UC_EGRESS_SUGGESTIONS_TABLE = "dbx_nwp_egress_suggestions"
+UC_POSTURE_DAILY_TABLE = "dbx_nwp_posture_daily"
+UC_POSTURE_STAGE_PREFIX = "dbx_nwp_posture_stage_"
 # Shortest policy name the interactive prompt accepts — a one-letter answer there is almost always a
 # stray "y" meant for a yes/no question (one such run created a policy literally named "y").
 MIN_POLICY_NAME_LEN = 3
@@ -122,6 +124,8 @@ class IngressConfig:
     policy_name: str = ""
     # Optional path to write the proposed network-policy JSON (single-policy scopes only).
     export: str = ""
+    # --review-pack <dir>: write the proposal as a test plan + review sheet for the owners (single-policy).
+    review_pack: str = ""
     # Whether to fold the workspace's enabled IP access lists into the CBI policy (alongside the
     # enriched observed-traffic rules). Detected automatically and confirmed interactively
     # (_reconcile_ip_acls); defaults to True so a --yes / non-interactive run migrates them.
@@ -255,12 +259,12 @@ def validate_policy_name(policy_name: str, policy_scope: str, policy_action: str
         )
 
 
-def validate_export(export: str, policy_scope: str) -> None:
-    """--export writes a single policy body, so it can't be used with per_workspace (which builds one
-    policy per workspace)."""
+def validate_export(export: str, policy_scope: str, flag: str = "--export") -> None:
+    """--export (and --review-pack) write a single policy body, so they can't be used with
+    per_workspace (which builds one policy per workspace)."""
     if export and policy_scope == "per_workspace":
         raise ValueError(
-            "--export writes a single network-policy body, so it can't be used with --policy-scope "
+            f"{flag} writes a single network-policy body, so it can't be used with --policy-scope "
             "per_workspace (which builds one policy per workspace). Use current_workspace or "
             "all_workspaces."
         )

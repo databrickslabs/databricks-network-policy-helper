@@ -493,6 +493,30 @@ def egress_preview(previews: dict, cfg: EgressConfig) -> None:
 
 
 # ------------------------------------------------------------------------------- apply results
+def posture(posture: dict, findings: list, maturity: dict) -> None:
+    """The `posture` summary: ingress maturity per workspace, findings by severity, tokens to review."""
+    from .core import posture_report
+
+    console.rule("Ingress posture by workspace")
+    rows = posture_report.maturity_rows(posture, maturity)
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["level"] = [("?" if r["level"] == "" else f"L{r['level']}") + " " + r["label"] for r in rows]
+        df = df[["workspace_id", "workspace_name", "effective_policy_id", "mode", "level", "why"]]
+    console.dataframe(df, "Maturity (L0 Open → L4 Hardened)")
+    console.rule("Findings")
+    fdf = pd.DataFrame(
+        [
+            {"severity": f.severity, "id": f.id, "workspace": f.workspace_id, "title": f.title}
+            for f in findings
+        ]
+    )
+    console.dataframe(fdf, "Findings (details, commands and docs are in report.md)")
+    n = len(posture_report.token_rows(posture))
+    if n:
+        console.banner("warn", f"{n} personal access token(s) worth reviewing: see tokens-to-revoke.csv.")
+
+
 def policy_url(account_host: str, account_id: str, policy_id: str) -> str:
     """The account-console URL for a network policy."""
     host = (account_host or "").rstrip("/")

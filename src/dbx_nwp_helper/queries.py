@@ -59,11 +59,14 @@ _IPV4_LONG_PORTABLE = f"""CASE WHEN {_IPV4_RLIKE} THEN
       END"""
 
 
-def _audit_projection(use_inet: bool, predicate: str, *, always_ipv4_long: bool = False) -> str:
+def _audit_projection(
+    use_inet: bool, predicate: str, *, always_ipv4_long: bool = False, with_request_params: bool = False
+) -> str:
     """The base audit projection with normalized_ip / ip_version derived either natively or portably,
     filtered by `predicate` (an event_date window). Portable mode additionally projects ipv4_long
     (used by the integer-bounds private-range check); `always_ipv4_long` projects it in native mode
-    too (the persisted daily table stores it so reads never need the INET builtins)."""
+    too (the persisted daily table stores it so reads never need the INET builtins).
+    `with_request_params` adds request_params (the posture verbose-audit check reads it)."""
     if use_inet:
         normalized, version = _NORMALIZED_IP_NATIVE, _IP_VERSION_NATIVE
         ipv4_long_col = f"{_IPV4_LONG_PORTABLE} AS ipv4_long,\n      " if always_ipv4_long else ""
@@ -81,7 +84,7 @@ def _audit_projection(use_inet: bool, predicate: str, *, always_ipv4_long: bool 
       {version} AS ip_version,
       {ipv4_long_col}user_agent,
       response.status_code AS status_code,
-      session_id, request_id
+      session_id, request_id{", request_params" if with_request_params else ""}
     FROM system.access.audit
     WHERE {predicate}
 """
@@ -181,20 +184,24 @@ def surface_summary(lookback_days: int, use_inet: bool = True) -> str:
     """
 
 
-def principal_network_diversity(lookback_days: int, use_inet: bool = True) -> str:
-    # distinct_networks approximates each principal's spread across networks. Native uses
-    # try_ip_cidr(CONCAT(ip,'/24' | '/48')); portable approximates it (IPv4 /24 = ipv4_long DIV 256,
-    # IPv6 the leading three hextets). Coarse, but this is a diagnostic surface only.
+def _network_expr(use_inet: bool) -> str:
+    """Each source IP's network: its /24 (IPv4) or /48 (IPv6). Native uses
+    try_ip_cidr(CONCAT(ip,'/24' | '/48')); portable approximates it (IPv4 /24 = ipv4_long DIV 256,
+    IPv6 the leading three hextets). Coarse, but it only feeds diagnostic counts."""
     if use_inet:
-        networks = """CASE
+        return """CASE
           WHEN ip_version = 4 THEN CAST(try_ip_cidr(CONCAT(normalized_ip, '/24')) AS STRING)
           WHEN ip_version = 6 THEN CAST(try_ip_cidr(CONCAT(normalized_ip, '/48')) AS STRING)
         END"""
-    else:
-        networks = """CASE
+    return """CASE
           WHEN ip_version = 4 THEN CONCAT('v4:', CAST(ipv4_long DIV 256 AS STRING))
           WHEN ip_version = 6 THEN CONCAT('v6:', substring_index(normalized_ip, ':', 3))
         END"""
+
+
+def principal_network_diversity(lookback_days: int, use_inet: bool = True) -> str:
+    # distinct_networks approximates each principal's spread across networks (see _network_expr).
+    networks = _network_expr(use_inet)
     return f"""
     WITH audit_recent AS ({_audit_recent(lookback_days, use_inet)}),
     principal_networks AS (
@@ -686,3 +693,241 @@ def metastore_workspace_ids() -> str:
     account, including banned/deleted ones). Used to verify inferred cross-workspace destination ids
     without account-admin credentials; the caller treats a missing table as "no verification"."""
     return "SELECT DISTINCT CAST(workspace_id AS BIGINT) AS workspace_id FROM system.access.workspaces_latest"
+
+
+# ---------------------------------------------------------------------------- posture (read-only)
+# `posture` scores each workspace before anyone writes a policy (see core/posture.py). Its audit checks
+# all read one rollup of system.access.audit: events grouped by day, workspace, source IP, principal,
+# client family and outcome, with IP parsing and classification done once per group rather than per
+# event. The rollup is the same SELECT however it's materialised, so results don't depend on the mode:
+#
+#   * direct (default): each check inlines the rollup as a CTE — one audit scan per check (fine for
+#     small accounts; the checks run in parallel);
+#   * --stage-schema: the rollup is built once into a temporary table, read by every check, then
+#     dropped — one audit scan per run;
+#   * --uc-schema: the rollup is persisted as `dbx_nwp_posture_daily` and kept up to date
+#     incrementally (core/persist.sync_daily, like dbx_nwp_ingress_daily) — later runs read only the
+#     newest days.
+#
+# "Public" uses the same audit projection and private-range filter as the ingress candidates. One
+# difference: posture counts NULL-status rows as not failed (it describes who reaches a workspace, not
+# which IPs to allow-list). Every query is SELECT-only.
+
+CLIENT_FAMILY = """CASE
+      WHEN user_agent ILIKE '%powerbi%' OR user_agent ILIKE '%power bi%' THEN 'Power BI'
+      WHEN user_agent ILIKE '%tableau%' THEN 'Tableau'
+      WHEN user_agent ILIKE '%dbt%' THEN 'dbt'
+      WHEN user_agent ILIKE '%fivetran%' THEN 'Fivetran'
+      WHEN user_agent ILIKE '%looker%' THEN 'Looker'
+      WHEN user_agent ILIKE '%chatgpt%' OR user_agent ILIKE '%openai%' THEN 'ChatGPT'
+      WHEN user_agent ILIKE '%claude%' OR user_agent ILIKE '%anthropic%' THEN 'Claude'
+      WHEN user_agent ILIKE '%terraform%' THEN 'Terraform'
+      WHEN user_agent ILIKE '%databricks-cli%' OR user_agent ILIKE '%cli/%' THEN 'Databricks CLI'
+      WHEN user_agent ILIKE '%databricks-sdk%' THEN 'Databricks SDK'
+      WHEN user_agent ILIKE '%jdbc%' OR user_agent ILIKE '%odbc%' OR user_agent ILIKE '%SimbaSpark%'
+        THEN 'JDBC/ODBC'
+      WHEN user_agent ILIKE '%mozilla%' THEN 'Browser'
+      WHEN user_agent IS NULL OR user_agent = '' THEN 'Unknown'
+      ELSE 'Other'
+    END"""
+
+# Hosted BI / SaaS families: better served by the managed Partner platforms source than by CIDRs.
+SAAS_CLIENT_FAMILIES = ("ChatGPT", "Claude", "Fivetran", "Looker", "Power BI", "Tableau", "dbt")
+
+# A service principal's audit identity is its application id (a UUID).
+_SP_PRINCIPAL = (
+    "principal RLIKE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'"
+)
+
+
+def _workspaces_predicate(workspace_ids) -> str:
+    """`AND CAST(workspace_id AS STRING) IN ('<id>', …, '0')` for the assessed workspaces plus account
+    level ('0'), or '' for the whole account. Ids must be numeric (they're inlined as literals)."""
+    ids = sorted({str(i).strip() for i in (workspace_ids or []) if str(i).strip()})
+    if not ids:
+        return ""
+    bad = [i for i in ids if not i.isdigit()]
+    if bad:
+        raise ValueError(f"workspace ids must be numeric: {bad}")
+    if "0" not in ids:
+        ids.append("0")
+    return "AND CAST(workspace_id AS STRING) IN (" + ", ".join(f"'{i}'" for i in ids) + ")"
+
+
+def posture_rollup_select(predicate: str, use_inet: bool = True) -> str:
+    """The posture rollup of system.access.audit rows matching `predicate`. `is_public`, `network` and
+    `client_family` are computed here (natively or portably), so reads never need INET functions.
+    Action names are kept only where a check needs them (IP-ACL denials, verbose-audit changes); every
+    other action collapses into one group, which keeps the rollup small."""
+    public = f"(ip_version = 4 AND {_not_private(use_inet)})"
+    verbose_off = (
+        "action_name = 'workspaceConfEdit' "
+        "AND request_params['workspaceConfKeys'] = 'enableVerboseAuditLogs' "
+        "AND lower(request_params['workspaceConfValues']) = 'false'"
+    )
+    return f"""
+    SELECT event_date,
+      CAST(workspace_id AS STRING) AS workspace_id,
+      normalized_ip AS source_ip,
+      ip_version,
+      {public} AS is_public,
+      {_network_expr(use_inet)} AS network,
+      principal,
+      {CLIENT_FAMILY} AS client_family,
+      CASE
+        WHEN action_name = 'IpAccessDenied' OR status_code = 403 THEN 'denied'
+        WHEN status_code IS NULL THEN 'null_status'
+        WHEN status_code < 400 THEN 'success'
+        ELSE 'failed'
+      END AS outcome,
+      CASE
+        WHEN action_name = 'IpAccessDenied' THEN 'IpAccessDenied'
+        WHEN {verbose_off} THEN 'verbose_audit_disabled'
+      END AS action,
+      COUNT(*) AS events,
+      MIN(event_time) AS first_time,
+      MAX(event_time) AS last_time
+    FROM ({_audit_projection(use_inet, predicate, with_request_params=True)})
+    WHERE normalized_ip IS NOT NULL OR ({verbose_off})
+    GROUP BY ALL
+    """
+
+
+def posture_daily_table_ddl(table: str) -> str:
+    return f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+      event_date DATE COMMENT 'Audit event date (UTC)',
+      workspace_id STRING COMMENT 'Workspace the request targeted (0 = account level)',
+      source_ip STRING COMMENT 'Normalised source IP',
+      ip_version INT,
+      is_public BOOLEAN COMMENT 'Public IPv4 (not private / reserved)',
+      network STRING COMMENT 'The source /24 (IPv4) or /48 (IPv6)',
+      principal STRING,
+      client_family STRING COMMENT 'User-agent family (Browser, Power BI, JDBC/ODBC, …)',
+      outcome STRING COMMENT 'success | null_status | denied | failed',
+      action STRING COMMENT 'IpAccessDenied | verbose_audit_disabled | NULL (any other action)',
+      events BIGINT,
+      first_time TIMESTAMP,
+      last_time TIMESTAMP,
+      loaded_at TIMESTAMP COMMENT 'When dbx-nwp-helper wrote this row'
+    )
+    USING DELTA
+    COMMENT 'dbx-nwp-helper: per-day rollup of system.access.audit for the posture checks'
+    """
+
+
+def posture_daily_table_insert(table: str, start_date: str, end_date: str, use_inet: bool = True) -> str:
+    predicate = f"event_date BETWEEN DATE'{start_date}' AND DATE'{end_date}'"
+    return f"""
+    INSERT INTO {table}
+    SELECT *, current_timestamp() AS loaded_at FROM ({posture_rollup_select(predicate, use_inet)})
+    """
+
+
+def posture_stage_table(table: str, lookback_days: int, use_inet: bool = True, workspace_ids=None) -> str:
+    """--stage-schema: build this run's rollup once into a temporary table (dropped at the end)."""
+    predicate = (
+        f"event_date >= current_date() - INTERVAL {lookback_days} DAYS {_workspaces_predicate(workspace_ids)}"
+    )
+    return f"CREATE OR REPLACE TABLE {table} AS {posture_rollup_select(predicate, use_inet)}"
+
+
+def _rollup_cte(lookback_days: int, workspace_ids, table: str | None, use_inet: bool) -> str:
+    """`WITH r AS (…)`: the rollup for this run's window, read from `table` (staged or persisted) or
+    inlined over system.access.audit (direct mode)."""
+    ws = _workspaces_predicate(workspace_ids)
+    window = f"event_date >= current_date() - INTERVAL {lookback_days} DAYS"
+    if table:
+        body = f"SELECT * FROM {table} WHERE {window} {ws}"
+    else:
+        body = posture_rollup_select(f"{window} {ws}", use_inet)
+    ok = "SELECT * FROM r WHERE is_public AND outcome IN ('success', 'null_status')"
+    return f"WITH r AS ({body}),\n    ok AS ({ok})"
+
+
+def posture_queries_over_rollup(
+    lookback_days: int, workspace_ids=None, table: str | None = None, use_inet: bool = True
+) -> dict[str, str]:
+    """name → SQL for every audit-based posture check, over the rollup (see _rollup_cte)."""
+    w = _rollup_cte(lookback_days, workspace_ids, table, use_inet)
+    sp = _SP_PRINCIPAL
+    return {
+        "account_level_public_access": f"""{w}
+    SELECT source_ip, SUM(events) AS events, COUNT(DISTINCT principal) AS principals,
+      MAX(event_date) AS last_seen
+    FROM ok WHERE workspace_id = '0'
+    GROUP BY source_ip ORDER BY events DESC""",
+        "audit_visibility": f"""{w}
+    SELECT workspace_id,
+      MIN(event_date) AS first_event_date, MAX(event_date) AS last_event_date,
+      COUNT(DISTINCT event_date) AS days_with_events,
+      SUM(CASE WHEN action = 'verbose_audit_disabled' THEN events ELSE 0 END)
+        AS verbose_audit_disabled_events,
+      MAX(CASE WHEN action = 'verbose_audit_disabled' THEN last_time END) AS last_verbose_audit_disabled
+    FROM r GROUP BY workspace_id ORDER BY workspace_id""",
+        "client_families_on_public_ips": f"""{w}
+    SELECT workspace_id, client_family, SUM(events) AS events,
+      COUNT(DISTINCT source_ip) AS distinct_public_ips, COUNT(DISTINCT principal) AS principals
+    FROM ok GROUP BY workspace_id, client_family ORDER BY events DESC LIMIT 500""",
+        "new_source_identity_pairs": f"""{w},
+    known AS (
+      SELECT DISTINCT principal, source_ip FROM ok WHERE event_date < current_date() - INTERVAL 1 DAYS
+    )
+    SELECT o.workspace_id, o.principal, o.source_ip, SUM(o.events) AS events, MAX(o.last_time) AS last_seen
+    FROM ok o
+    LEFT ANTI JOIN known k ON o.principal = k.principal AND o.source_ip = k.source_ip
+    WHERE o.event_date >= current_date() - INTERVAL 1 DAYS AND o.principal <> 'UNKNOWN'
+    GROUP BY o.workspace_id, o.principal, o.source_ip ORDER BY events DESC LIMIT 500""",
+        "principal_network_spread": f"""{w}
+    SELECT principal,
+      CASE WHEN {sp} THEN 'service_principal' WHEN principal LIKE '%@%' THEN 'user' ELSE 'other' END
+        AS principal_type,
+      COUNT(DISTINCT source_ip) AS distinct_public_ips,
+      COUNT(DISTINCT network) AS distinct_public_24s,
+      COUNT(DISTINCT workspace_id) AS workspaces,
+      SUM(events) AS events, MAX(event_date) AS last_seen
+    FROM ok WHERE principal <> 'UNKNOWN'
+    GROUP BY principal HAVING COUNT(DISTINCT network) >= 2
+    ORDER BY distinct_public_24s DESC, events DESC LIMIT 200""",
+        "public_browser_vs_api": f"""{w}
+    SELECT workspace_id, SUM(events) AS public_events,
+      SUM(CASE WHEN client_family = 'Browser' THEN events ELSE 0 END) AS browser_events,
+      COUNT(DISTINCT CASE WHEN client_family <> 'Browser' THEN principal END) AS programmatic_principals,
+      COUNT(DISTINCT CASE WHEN client_family <> 'Browser' AND {sp} THEN principal END)
+        AS programmatic_service_principals,
+      ROUND(100.0 * SUM(CASE WHEN client_family = 'Browser' THEN events ELSE 0 END) / SUM(events), 1)
+        AS browser_pct
+    FROM ok WHERE workspace_id <> '0'
+    GROUP BY workspace_id ORDER BY public_events DESC""",
+        "traffic_by_ip_class": f"""{w}
+    SELECT workspace_id, SUM(events) AS events,
+      SUM(CASE WHEN is_public THEN events ELSE 0 END) AS public_v4_events,
+      SUM(CASE WHEN ip_version = 4 AND NOT is_public THEN events ELSE 0 END) AS private_v4_events,
+      SUM(CASE WHEN ip_version = 6 THEN events ELSE 0 END) AS ipv6_events,
+      COUNT(DISTINCT CASE WHEN is_public THEN source_ip END) AS distinct_public_ips,
+      COUNT(DISTINCT CASE WHEN is_public THEN network END) AS distinct_public_24s,
+      COUNT(DISTINCT CASE WHEN ip_version = 6 THEN source_ip END) AS distinct_ipv6_ips,
+      COUNT(DISTINCT CASE WHEN is_public THEN principal END) AS public_principals
+    FROM r WHERE source_ip IS NOT NULL
+    GROUP BY workspace_id ORDER BY public_v4_events DESC""",
+    }
+
+
+def posture_inbound_outcomes(lookback_days: int, workspace_ids=None) -> str:
+    """CBI policy outcomes per workspace from system.access.inbound_network: events, sources,
+    identities and distinct source/identity/rule combinations per raw policy_outcome. The caller
+    classifies the outcome values (core/posture.outcome_class). Best-effort: the table exists only
+    where network monitoring is on."""
+    return f"""
+    SELECT CAST(workspace_id AS STRING) AS workspace_id, policy_outcome,
+      COUNT(*) AS events,
+      COUNT(DISTINCT source.ip) AS distinct_source_ips,
+      COUNT(DISTINCT authenticated_as) AS identities,
+      COUNT(DISTINCT concat_ws('|', source.ip, authenticated_as, rule_label)) AS combinations,
+      MIN(event_time) AS first_seen, MAX(event_time) AS last_seen
+    FROM system.access.inbound_network
+    WHERE event_time >= current_date() - INTERVAL {lookback_days} DAYS
+      {_workspaces_predicate(workspace_ids)}
+    GROUP BY ALL
+    ORDER BY workspace_id, events DESC
+    """
